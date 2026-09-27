@@ -1,25 +1,25 @@
 {
-  "script_sha256": "c73c861a7a58a68605406590d2731789e6429060f3bea8c72ee80b66e45b562a",
+  "script_sha256": "1a5893abf71101af6b72329703ce2f59a35f3547e268cf86bda45aa4064f8ed6",
   "environment": "isolated Linux fixture with FreeBSD/CLI shims",
   "tests": [
     {
       "test": "test_archive_failure_preserves",
       "exit": 1,
-      "seconds": 0.27,
+      "seconds": 0.25,
       "archives": 0,
       "staging": 1
     },
     {
       "test": "test_ascii_control_not_cb2",
       "exit": 0,
-      "seconds": 0.26,
+      "seconds": 0.27,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_changing_file_partial",
       "exit": 2,
-      "seconds": 0.43,
+      "seconds": 0.42,
       "archives": 1,
       "staging": 0
     },
@@ -40,7 +40,7 @@
     {
       "test": "test_corrupt_archive_rejected",
       "exit": 1,
-      "seconds": 0.26,
+      "seconds": 0.25,
       "archives": 0,
       "staging": 1
     },
@@ -82,7 +82,7 @@
     {
       "test": "test_hash_failure_preserves",
       "exit": 1,
-      "seconds": 0.26,
+      "seconds": 0.27,
       "archives": 0,
       "staging": 1
     },
@@ -110,7 +110,7 @@
     {
       "test": "test_python_stat_fallback",
       "exit": 0,
-      "seconds": 0.36,
+      "seconds": 0.35,
       "archives": 1,
       "staging": 0
     },
@@ -124,7 +124,7 @@
     {
       "test": "test_sessions_and_source_grouping",
       "exit": 2,
-      "seconds": 0.29,
+      "seconds": 0.28,
       "archives": 1,
       "staging": 0
     },
@@ -136,9 +136,86 @@
       "staging": 1
     },
     {
-      "test": "test_timeline_failure_partial",
+      "test": "test_support_absent_is_partial",
+      "exit": 2,
+      "seconds": 0.27,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_default_does_not_invoke",
+      "exit": 0,
+      "seconds": 0.27,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_external_workspace_limit",
+      "exit": 1,
+      "seconds": 1.04,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_support_failures_are_partial",
       "exit": 2,
       "seconds": 0.26,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_failures_are_partial",
+      "exit": 2,
+      "seconds": 0.27,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_failures_are_partial",
+      "exit": 2,
+      "seconds": 0.27,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_failures_are_partial",
+      "exit": 2,
+      "seconds": 0.3,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_failures_are_partial",
+      "exit": 2,
+      "seconds": 0.28,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_invalid_timeout",
+      "exit": 1,
+      "seconds": 0.01,
+      "archives": 0,
+      "staging": 0
+    },
+    {
+      "test": "test_support_success_independent_opt_in",
+      "exit": 0,
+      "seconds": 0.29,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_support_timeout_continues_packaging",
+      "exit": 2,
+      "seconds": 1.27,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_timeline_failure_partial",
+      "exit": 2,
+      "seconds": 0.27,
       "archives": 1,
       "staging": 0
     },

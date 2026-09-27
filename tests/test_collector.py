@@ -52,7 +52,7 @@ class Fixture:
             (root / d).mkdir(parents=True, exist_ok=True)
         for n in ('sh dash id sed hostname date mkdir basename dirname realpath timeout awk sha256sum '
                   'find wc tr df du sleep mktemp cmp expr cat grep head sort xargs stat ls cut '
-                  'od gzip tail mv rm tar cp uname touch chmod').split():
+                  'od gzip tail mv rm tar cp uname touch chmod ln').split():
             binary(root, n)
         (root/'bin/stat').rename(root/'bin/stat-real')
         put(root, '/sbin/stat', '#!/bin/sh\nfmt=$2; shift; shift\ncase \"$fmt\" in %m) exec /bin/stat-real -c %Y \"$@\";; %d:%i) exec /bin/stat-real -c %d:%i \"$@\";; esac\nexec /bin/stat-real --printf="0|%n|%i|%A|%u|%g|%s|%X|%Y|%Z|%W\\n" -- "$@"\n', 0o755)
@@ -65,7 +65,7 @@ class Fixture:
                      'fstat', 'kldstat', 'mount', 'ntpq', 'crontab']:
             put(root, '/sbin/'+tool, '#!/bin/sh\nexit 0\n', 0o755)
         put(root, '/sbin/ls', '#!/bin/sh\ncase "$1" in -laT) shift; exec /bin/ls -la "$@";; -lT) shift; exec /bin/ls -l "$@";; esac\nexec /bin/ls "$@"\n', 0o755)
-        put(root, '/sbin/df', '#!/bin/sh\necho \"Filesystem 1024-blocks Used Available Capacity Mounted\"\necho \"fixture 10000000 1 9999999 1% /\"\n', 0o755)
+        put(root, '/sbin/df', '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\nshift\nfor path do echo "fixture 10000000 1 9999999 1% /"; done\n', 0o755)
         put(root, '/netscaler/ns_gui/library.php', "<?php $marker = '-----BEGIN PRIVATE KEY-----'; ?>\n")
         (root/'netscaler/ns_gui/wrong-extension.gif').write_bytes(bytes.fromhex('89504e470d0a1a0a'))
         put(root, '/etc/auth.conf', '# synthetic fixture\n')
@@ -253,6 +253,78 @@ class CollectorTests(unittest.TestCase):
 
     def test_keep_staging(self):
         f=self.fixture(); self.assertEqual(f.run('-k'),0,f.result.stderr); self.assertTrue(f.staging)
+
+
+    def support_fixture(self, behavior='success'):
+        f=self.fixture()
+        put(f.root, '/tmp/vendor-payload', SECRET+'\n')
+        code = """#!/bin/sh
+[ "$*" = '-scope NODE' ] || exit 12
+mkdir -p /var/tmp/support
+echo invoked > /tmp/vendor-invoked
+"""
+        if behavior=='timeout': code += 'sleep 20\n'
+        elif behavior=='failed': code += 'exit 7\n'
+        elif behavior=='stale': code += 'exit 0\n'
+        elif behavior=='missing': code += 'exit 0\n'
+        elif behavior=='corrupt':
+            code += 'echo broken > /var/tmp/support/collector_new.tar.gz\nln -sf /var/tmp/support/collector_new.tar.gz /var/tmp/support/support.tgz\n'
+        elif behavior=='outside':
+            code += 'ln -sf /tmp/vendor-payload /var/tmp/support/support.tgz\n'
+        elif behavior=='bloat':
+            (f.root/'tmp/bloat').write_bytes(b'x'*2*1024*1024)
+            code += 'cp /tmp/bloat /var/tmp/support/bloat; sleep 20\n'
+        else:
+            code += 'tar -czf /var/tmp/support/collector_new.tar.gz -C /tmp vendor-payload\nln -sf /var/tmp/support/collector_new.tar.gz /var/tmp/support/support.tgz\n'
+        put(f.root, '/netscaler/showtechsupport.pl', code, 0o755)
+        if behavior=='stale':
+            put(f.root, '/var/tmp/support/collector_old.tar.gz', 'old')
+            (f.root/'var/tmp/support/support.tgz').symlink_to('collector_old.tar.gz')
+        return f
+
+    def test_support_success_independent_opt_in(self):
+        f=self.support_fixture(); self.assertEqual(f.run('--support-bundle'),0,f.result.stderr)
+        d=f.records[0]['data']; payload=d['support_bundle/bundle.tar.gz']
+        self.assertEqual(hashlib.sha256(payload).hexdigest(),d['support_bundle/bundle.tar.gz.sha256'].decode().split()[0])
+        with tarfile.open(fileobj=io.BytesIO(payload)) as t:
+            self.assertEqual(t.extractfile('vendor-payload').read(),(SECRET+'\n').encode())
+        self.assertNotIn('files/evidence_files.tar',d)
+        self.assertTrue((f.root/'var/tmp/support/collector_new.tar.gz').exists())
+
+    def test_support_default_does_not_invoke(self):
+        f=self.support_fixture(); self.assertEqual(f.run(),0,f.result.stderr)
+        self.assertFalse((f.root/'tmp/vendor-invoked').exists())
+        self.assertNotIn(SECRET.encode(),b'\n'.join(f.records[0]['data'].values()))
+
+    def test_support_timeout_continues_packaging(self):
+        f=self.support_fixture('timeout')
+        self.assertEqual(f.run('--support-bundle','--support-timeout=1'),2,f.result.stderr)
+        d=f.records[0]['data']; self.assertIn(b'support_command_failed:124',d['00_stage_events.tsv'])
+        self.assertNotIn('support_bundle/bundle.tar.gz',d)
+        self.assertTrue(d['timeline/bodyfile.txt'])
+
+    def test_support_failures_are_partial(self):
+        for behavior, expected in [('failed','support_command_failed:7'),('stale','support_archive_not_new'),
+                                   ('missing','support_archive_missing'),('corrupt','support_archive_invalid'),
+                                   ('outside','support_archive_unexpected_path')]:
+            with self.subTest(behavior=behavior):
+                f=self.support_fixture(behavior)
+                self.assertEqual(f.run('--support-bundle'),2,f.result.stderr)
+                d=f.records[0]['data']; self.assertIn(expected.encode(),d['00_stage_events.tsv'])
+                self.assertNotIn('support_bundle/bundle.tar.gz',d)
+
+    def test_support_absent_is_partial(self):
+        f=self.fixture(); self.assertEqual(f.run('--support-bundle'),2,f.result.stderr)
+        self.assertIn(b'support_collector_unavailable',f.records[0]['data']['00_stage_events.tsv'])
+
+    def test_support_external_workspace_limit(self):
+        f=self.support_fixture('bloat'); self.assertEqual(f.run('--support-bundle','-m','1'),1,f.result.stderr)
+        self.assertTrue(f.staging); self.assertFalse(f.records)
+        self.assertTrue(list((f.root/'out').glob('*.limit')))
+
+    def test_support_invalid_timeout(self):
+        f=self.fixture(); self.assertEqual(f.run('--support-bundle','--support-timeout=0'),1)
+        self.assertFalse(f.staging)
 
 if __name__=='__main__':
     try:

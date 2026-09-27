@@ -1,7 +1,11 @@
 #!/bin/sh
-# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.1
+# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.2
 # Usage: sh ns_ir_collect.sh [-o DIR] [-C CASE] [-d DAYS] [-k] [-S] [-cnb]
 #        [-t SECONDS] [-m MAX_MB] [-r RESERVE_MB]
+#        [--support-bundle] [--support-timeout=SECONDS]
+# --support-bundle permits a sensitive vendor archive independently of -S.
+# Vendor diagnostics have side effects; files remain in vendor support dirs.
+# --support-timeout=SECONDS: vendor deadline (default 600); -t still applies.
 # Default: metadata and aggregate findings; no raw source files or log lines.
 # -S explicitly permits sensitive forensic data, INCLUDING private keys,
 # configuration, histories, process arguments and session material.
@@ -23,7 +27,7 @@ umask 077
 # Do not leave collector/child core dumps containing in-memory source data.
 # shellcheck disable=SC3045 # FreeBSD sh and supported test shells provide -c.
 ulimit -c 0
-VERSION=1.1
+VERSION=1.2
 OUTPARENT=/var/tmp
 CASEID=unspecified
 DAYS=120
@@ -32,12 +36,19 @@ COPY_NSLOG=0
 HASH_BINS=0
 KEEP_STAGING=0
 SENSITIVE=0
+SUPPORT_BUNDLE=0
+SUPPORT_SECONDS=600
 MAX_SECONDS=900
 MAX_MB=512
 RESERVE_MB=64
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
-while getopts 'o:C:d:t:m:r:Scnbkh' opt; do
+while getopts 'o:C:d:t:m:r:Scnbkh-:' opt; do
     case "$opt" in
+        -) case "$OPTARG" in
+            support-bundle) SUPPORT_BUNDLE=1;;
+            support-timeout=*) SUPPORT_SECONDS=${OPTARG#*=};;
+            *) echo "ERROR: unknown option --$OPTARG" >&2; exit 1;;
+           esac;;
         o) OUTPARENT=$OPTARG;; C) CASEID=$OPTARG;; d) DAYS=$OPTARG;;
         t) MAX_SECONDS=$OPTARG;; m) MAX_MB=$OPTARG;; r) RESERVE_MB=$OPTARG;;
         S) SENSITIVE=1;; c) COPY_CORES=1;; n) COPY_NSLOG=1;;
@@ -52,6 +63,9 @@ number() {
 }
 number days "$DAYS" 0 36500
 number seconds "$MAX_SECONDS" 1 86400
+number support_seconds "$SUPPORT_SECONDS" 1 86400
+# shellcheck disable=SC2003
+SUPPORT_SECONDS=$(expr "$SUPPORT_SECONDS" + 0)
 number max_mb "$MAX_MB" 1 1048576
 number reserve_mb "$RESERVE_MB" 1 1048576
 # Decimal normalization also avoids shell arithmetic treating 08 as octal.
@@ -88,10 +102,28 @@ hash1() {
     [ "${#_hash}" -eq 64 ] || return 1
     printf '%s\n' "$_hash"
 }
-free_kb() { df -Pk "$OUTPARENT" 2>/dev/null | awk 'END {if ($4 ~ /^[0-9]+$/) print $4}'; }
+# Include vendor workspace/archive bytes, even existing bundles, in the budget.
+# These fixed locations can be on different filesystems from OUTPARENT.
+resource_kb() {
+    du -sk "$OUT" "$OUT.partial.tgz" "$ARCHIVE" "$OUT.packaging.log" "$OUT.members" 2>/dev/null
+    if [ "$SUPPORT_BUNDLE" -eq 1 ]; then
+        du -sk /var/tmp/support /flash/support 2>/dev/null
+    fi
+    return 0
+}
+free_kb() { if [ "$SUPPORT_BUNDLE" -eq 1 ]; then
+        df -Pk "$OUTPARENT" /var/tmp /flash 2>/dev/null | awk 'NR>1 && $4 ~ /^[0-9]+$/ {if (!n++ || $4<m) m=$4} END {if(n==3) print m}'
+    else
+        df -Pk "$OUTPARENT" 2>/dev/null | awk 'END {if ($4 ~ /^[0-9]+$/) print $4}'
+    fi; }
 if [ -z "${NSIR_WORKDIR:-}" ]; then
     [ -d "$OUTPARENT" ] || { echo 'ERROR: output parent must already exist' >&2; exit 1; }
     OUTPARENT=$(cd "$OUTPARENT" && pwd -P) || exit 1
+    if [ "$SUPPORT_BUNDLE" -eq 1 ]; then
+        case "$OUTPARENT/" in /var/tmp/support/*|/flash/support/*)
+            echo 'ERROR: choose an output parent outside vendor support directories' >&2; exit 1;;
+        esac
+    fi
     # Paths are metadata, but control bytes/delimiters would break manifests.
     case "$OUTPARENT" in *[!\ -~]*|*'|'*) echo 'ERROR: unsupported output path' >&2; exit 1;; esac
     HOST=$(hostname 2>/dev/null | tr -cd 'a-zA-Z0-9._-')
@@ -119,7 +151,7 @@ if [ -z "${NSIR_WORKDIR:-}" ]; then
     trap 'stop 129' HUP
     (
         while kill -0 "$RUNNER" 2>/dev/null; do
-            USED=$(du -sk "$OUT" "$OUT.partial.tgz" "$ARCHIVE" "$OUT.packaging.log" "$OUT.members" 2>/dev/null | awk '{n += $1} END {print n+0}')
+            USED=$(resource_kb | awk '{n += $1} END {print n+0}')
             AVAIL=$(free_kb)
             REASON=''
             if [ "$USED" -gt "$((MAX_MB * 1024))" ]; then REASON=output_size_limit
@@ -138,7 +170,7 @@ if [ -z "${NSIR_WORKDIR:-}" ]; then
     wait "$MONITOR" 2>/dev/null || :
     trap - INT TERM HUP
     # Catch a run that exceeded a size/reserve limit between monitor samples.
-    USED=$(du -sk "$OUT" "$OUT.partial.tgz" "$ARCHIVE" "$OUT.packaging.log" "$OUT.members" 2>/dev/null | awk '{n += $1} END {print n+0}')
+    USED=$(resource_kb | awk '{n += $1} END {print n+0}')
     AVAIL=$(free_kb)
     if [ "$USED" -gt "$((MAX_MB * 1024))" ] || [ -z "$AVAIL" ] || [ "$AVAIL" -lt "$((RESERVE_MB * 1024))" ]; then
         printf '%s\n' final_resource_limit > "$OUT.limit"
@@ -173,7 +205,14 @@ STAGE=preflight
 : > "$FLAGS"; : > "$COPYLIST"; : > "$ERRORS"; : > "$EVENTS"
 status() { printf '%s\t%s\t%s\n' "$STAGE" "$1" "$2" >> "$EVENTS" || exit 1; }
 partial() { printf '%s\t%s\n' "$STAGE" "$1" >> "$ERRORS" || exit 1; status partial "$1"; }
-fatal() { status failed "$1"; printf 'ERROR: %s; staging preserved: %s\n' "$1" "$OUT" >&2; exit 1; }
+SUPPORT_RUNNER=''
+fatal() {
+    if [ -n "$SUPPORT_RUNNER" ]; then
+        kill -TERM "$SUPPORT_RUNNER" 2>/dev/null || :
+        wait "$SUPPORT_RUNNER" 2>/dev/null || :
+        SUPPORT_RUNNER=''
+    fi
+    status failed "$1"; printf 'ERROR: %s; staging preserved: %s\n' "$1" "$OUT" >&2; exit 1; }
 trap 'fatal interrupted_TERM' TERM
 trap 'fatal interrupted_INT' INT
 trap 'fatal interrupted_HUP' HUP
@@ -241,6 +280,7 @@ log "NetScaler IR collector v$VERSION -> $OUT (sensitive=$SENSITIVE)"
     echo "script_sha256=$(hash1 "$SELF")"
     echo "lookback_days=$DAYS"
     echo "sensitive=$SENSITIVE"
+    echo "support_bundle=$SUPPORT_BUNDLE support_timeout_seconds=$SUPPORT_SECONDS"
     echo "limits_seconds=$MAX_SECONDS output_MiB=$MAX_MB reserve_MiB=$RESERVE_MB"
     echo "options=cores:$COPY_CORES nslog:$COPY_NSLOG hashbins:$HASH_BINS"
 } > "$OUT/00_metadata.txt" || fatal metadata_write
@@ -801,6 +841,74 @@ if [ "$SENSITIVE" -eq 1 ]; then
 else
     status skipped 'source copies excluded by selected metadata scope'
 fi
+# Run after IR evidence capture so vendor workspace does not enter its timeline.
+stage support_bundle 'optional vendor support bundle'
+collect_support_bundle() {
+    SUPPORT_DIR=$OUT/support_bundle
+    mkdir "$SUPPORT_DIR" || fatal support_directory_write
+    if [ ! -x /netscaler/showtechsupport.pl ]; then
+        partial support_collector_unavailable; return
+    fi
+    # Record pre-existing paths, including broken symlinks. Never accept one as new.
+    : > "$SUPPORT_DIR/before_paths.txt" || fatal support_inventory_write
+    for sb_path in /var/tmp/support/collector_*.tar.gz /flash/support/collector_*.tar.gz; do
+        if [ -e "$sb_path" ] || [ -L "$sb_path" ]; then
+            printf '%s\n' "$sb_path" >> "$SUPPORT_DIR/before_paths.txt" || fatal support_inventory_write
+        fi
+    done
+    hash1 /netscaler/showtechsupport.pl > "$SUPPORT_DIR/collector.sha256" || { partial support_collector_hash_failed; return; }
+    printf '%s\n' 'command=/netscaler/showtechsupport.pl -scope NODE' > "$SUPPORT_DIR/status.txt" || fatal support_status_write
+    timeout -k 5 "$SUPPORT_SECONDS" /netscaler/showtechsupport.pl -scope NODE < /dev/null > "$SUPPORT_DIR/command.log" 2>&1 &
+    SUPPORT_RUNNER=$!
+    wait "$SUPPORT_RUNNER"
+    sb_rc=$?
+    SUPPORT_RUNNER=''
+    printf 'command_exit=%s\n' "$sb_rc" >> "$SUPPORT_DIR/status.txt" || fatal support_status_write
+    if [ "$sb_rc" -ne 0 ]; then partial "support_command_failed:$sb_rc"; return; fi
+    if grep -qiE '^[[:space:]]*(ERROR:|ERROR |Invalid command|Permission denied|Access denied)' "$SUPPORT_DIR/command.log"; then
+        partial support_command_reported_errors
+    fi
+    [ -e /var/tmp/support/support.tgz ] || { partial support_archive_missing; return; }
+    sb_source=$(realpath /var/tmp/support/support.tgz 2>/dev/null) || { partial support_archive_missing; return; }
+    case "$sb_source" in
+        /var/tmp/support/collector_*.tar.gz|/flash/support/collector_*.tar.gz) ;;
+        *) partial support_archive_unexpected_path; return;;
+    esac
+    # Reject nested paths/control characters, even within an allowed prefix.
+    sb_base=${sb_source##*/}
+    case "$sb_base" in *[!a-zA-Z0-9._:-]*) partial support_archive_invalid_name; return;; esac
+    [ "$sb_source" = "/var/tmp/support/$sb_base" ] || [ "$sb_source" = "/flash/support/$sb_base" ] || { partial support_archive_unexpected_path; return; }
+    if grep -Fx "$sb_source" "$SUPPORT_DIR/before_paths.txt" >/dev/null; then
+        partial support_archive_not_new; return
+    fi
+    if [ ! -f "$sb_source" ] || [ -L "$sb_source" ] || [ ! -s "$sb_source" ]; then
+        partial support_archive_missing; return
+    fi
+    printf 'source=%s\n' "$sb_source" >> "$SUPPORT_DIR/status.txt" || fatal support_status_write
+    sb_hash=$(hash1 "$sb_source") || { partial support_source_hash_failed; return; }
+    sb_copy=$SUPPORT_DIR/bundle.partial.tar.gz
+    if ! cp "$sb_source" "$sb_copy"; then
+        rm -f "$sb_copy"; partial support_copy_failed; return
+    fi
+    sb_captured=$(hash1 "$sb_copy") || sb_captured=''
+    sb_after=$(hash1 "$sb_source") || sb_after=''
+    if [ "$sb_hash" != "$sb_captured" ] || [ "$sb_hash" != "$sb_after" ]; then
+        rm -f "$sb_copy"; partial support_archive_changed; return
+    fi
+    if ! tar -tzf "$sb_copy" > "$SUPPORT_DIR/members.txt" 2>> "$SUPPORT_DIR/command.log" || [ ! -s "$SUPPORT_DIR/members.txt" ]; then
+        rm -f "$sb_copy"; partial support_archive_invalid; return
+    fi
+    mv "$sb_copy" "$SUPPORT_DIR/bundle.tar.gz" || fatal support_finalize
+    printf '%s  bundle.tar.gz\n' "$sb_captured" > "$SUPPORT_DIR/bundle.tar.gz.sha256" || fatal support_checksum_write
+    status success 'new vendor archive captured and verified; internal diagnostic completeness not asserted'
+}
+if [ "$SUPPORT_BUNDLE" -eq 1 ]; then
+    log 'Sensitive vendor bundle enabled; vendor diagnostics and external workspace are included'
+    collect_support_bundle
+else
+    status skipped 'vendor support bundle not requested'
+fi
+stage packaging 'final archive'
 rm -f "$OUT/.stat-helper" "$COPYLIST" "$OUT/.webfiles0" "$OUT/.web_only0" "$OUT/.imgpaths" "$OUT/.recent_web"
 [ -s "$FLAGS" ] || printf '%s\n' '[INFO] No heuristic hits; this is not proof of a clean device.' > "$FLAGS"
 RESULT=0

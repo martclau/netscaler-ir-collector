@@ -1,0 +1,37 @@
+{
+  "collector_sha256": "1a5893abf71101af6b72329703ce2f59a35f3547e268cf86bda45aa4064f8ed6",
+  "outer_bytes": 6294169,
+  "outer_sha256": "03f58c3d46a383703dfe7dc72522fbda420b34661925c4e72f7ef0b58ebacbe7",
+  "bundle_bytes": 3078063,
+  "bundle_sha256": "6f0800b4a6fe1d55a11a06cd2424b52f952e77b73abff1870ab56266c4c63b99",
+  "bundle_member_count": 265,
+  "utc_start": "2026-07-27T06:18:18Z",
+  "utc_end": "2026-07-27T06:19:11Z",
+  "collection_exit": "2",
+  "support_status": [
+    "command=/netscaler/showtechsupport.pl -scope NODE",
+    "command_exit=0",
+    "source=/var/tmp/support/collector_P_192.168.56.10_27Jul2026_06_18.tar.gz"
+  ],
+  "stage_status": [
+    "1\tpartial",
+    "2\tsuccess_with_skips",
+    "3\tsuccess",
+    "4\tsuccess_with_skips",
+    "5\tsuccess",
+    "6\tsuccess_with_skips",
+    "7\tsuccess",
+    "8\tsuccess",
+    "9\tsuccess_with_skips",
+    "packaging\tsuccess",
+    "support_bundle\tsuccess"
+  ],
+  "partial_events": [
+    "1\tpartial\tcommand_failed:system/kldstat.txt:127"
+  ],
+  "vendor_collector_sha256": "e5d44dd00990f15a6922f072f3b576c2b5d61eafe19505c5b297920633cb5d61",
+  "raw_ir_evidence_present": false,
+  "outer_checksum_matches": true,
+  "bundle_checksum_matches": true,
+  "vendor_source_matches": true
+}

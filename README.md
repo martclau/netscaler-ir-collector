@@ -1,6 +1,6 @@
 # NetScaler IR triage collector
 
-`ns_ir_collect.sh` v1.1 collects metadata and heuristic findings from a NetScaler root shell. It is an **experimental live-response aid**, not a disk imager, vulnerability scanner, or proof that an appliance is clean.
+`ns_ir_collect.sh` v1.2 collects metadata and heuristic findings from a NetScaler root shell. It is an **experimental live-response aid**, not a disk imager, vulnerability scanner, or proof that an appliance is clean.
 
 Version 1.1 fixes the archive-loss and misleading-success defects found in v1.0. See [validation results](VALIDATION.md). Metadata-mode collection has completed on the local NetScaler 14.1 build 73.30 lab with a documented missing-utility partial status. Production-load acceptance and full sensitive-mode appliance collection remain unverified.
 
@@ -14,9 +14,9 @@ sh /var/tmp/ns_ir_collect.sh -C INC-2026-0412
 sh /var/tmp/ns_ir_collect.sh -S -C INC-2026-0412
 ```
 
-**Default mode does not copy source files, full configuration, raw log lines, histories, process arguments, account records, or session IDs.** It collects process names, network metadata, a filesystem timeline, path/hash inventories, version output, and aggregate heuristic results. It reads configuration and logs to produce those results. Paths, hostnames, addresses, case IDs, and executable names remain potentially sensitive metadata; attacker-controlled names are not an arbitrary-secret redaction boundary.
+**With neither `-S` nor `--support-bundle`, default mode does not copy source files, full configuration, raw log lines, histories, process arguments, account records, or session IDs.** It collects process names, network metadata, a filesystem timeline, path/hash inventories, version output, and aggregate heuristic results. It reads configuration and logs to produce those results. Paths, hostnames, addresses, case IDs, and executable names remain potentially sensitive metadata; attacker-controlled names are not an arbitrary-secret redaction boundary.
 
-**`-S` explicitly permits sensitive data, including private keys.** This mode can copy raw configuration, suspicious files, histories and logs, and capture detailed process and CLI output. It does not promise to exclude keys or credentials. Every source-file copy passes one final mode gate. Collection is selective, not a complete filesystem backup. Store sensitive output under your evidence-handling policy; the script sets `umask 077` but does not encrypt archives.
+**`-S` explicitly permits sensitive data, including private keys.** This mode can copy raw configuration, suspicious files, histories and logs, and capture detailed process and CLI output. It does not promise to exclude keys or credentials. Raw IR source-file copies require `-S`; the vendor archive has its separate explicit opt-in. Collection is selective, not a complete filesystem backup. Store sensitive output under your evidence-handling policy; the script sets `umask 077` but does not encrypt archives.
 
 The script does not enable traffic features, alter authentication policy, create packet-engine core dumps, or intentionally reboot the appliance. Live reads and commands have a forensic footprint, including atime updates and appliance command/audit logging. Timeline capture occurs before bulk scanning, but after script hashing and volatile/CLI collection.
 
@@ -25,6 +25,8 @@ The script does not enable traffic features, alter authentication policy, create
 | `-o DIR` | Existing output parent | `/var/tmp` |
 | `-C ID` | Case ID: letters, digits, dot, underscore, hyphen | `unspecified` |
 | `-d DAYS` | Recent-file ctime lookback, 0–36500 | `120` |
+| `--support-bundle` | Include a sensitive vendor support archive; independent of `-S` | Off |
+| `--support-timeout=SECONDS` | Vendor generation deadline, 1–86400; whole-run deadline still applies | `600` |
 | `-S` | Permit raw sensitive forensic collection | Off |
 | `-c` | Include core files; requires `-S` | Off |
 | `-n` | Include performance logs; requires `-S` | Off |
@@ -36,6 +38,23 @@ The script does not enable traffic features, alter authentication policy, create
 | `-h` | Help | |
 
 `-m` and `-r` are sampled once per second and checked again before staging cleanup. They are **not filesystem quotas**: a fast writer can temporarily overshoot them. The monitored footprint includes staging, the outer archive and packaging sidecars; full mode temporarily holds both inner and outer archives and a per-file verification buffer. Budget for these duplicate bytes. SIGKILL, power loss, uninterruptible kernel I/O and exhausted storage can defeat normal cleanup/status reporting.
+
+## Vendor support bundle
+
+```sh
+# Vendor diagnostics plus metadata/aggregate IR collection:
+sh /var/tmp/ns_ir_collect.sh --support-bundle --support-timeout=600 -t 1200 -m 2048 -C INC-2026-0412
+```
+
+`--support-bundle` explicitly permits sensitive vendor data without enabling the additional raw IR collection controlled by `-S`. Add `-S` only if both are wanted. The wrapper invokes the installed `/netscaler/showtechsupport.pl -scope NODE` directly so its timeout supervises the actual collector. It does not request upload. This integration requires that executable and the standard `/var/tmp/support/support.tgz` output link; other layouts produce a partial result.
+
+Vendor diagnostics run after IR evidence capture. They can change diagnostic state (the inspected build includes `clearconfigtimings`) and generate audit records. Vendor filtering is not a guarantee that secrets have been removed. Treat the outer archive, vendor command log, member list, and remaining vendor files as sensitive.
+
+The wrapper rejects pre-existing archive paths, copies the new archive, compares source-before, captured, and source-after SHA-256 values, and verifies its tar listing. The included `support_bundle/bundle.tar.gz` has its own checksum, installed-collector digest, provenance/status, and member list. Verification establishes captured-byte integrity, not that every vendor diagnostic succeeded. Explicit top-level error messages mark collection partial.
+
+A vendor timeout, missing collector/archive, failed command, invalid archive, or changed source records a partial result while IR packaging continues. The whole-run `-t` deadline and resource limits still stop the entire run. Set `-t` above the vendor deadline with time for IR collection and packaging. The size budget includes existing and new files in `/var/tmp/support` and `/flash/support`, plus our staging and archive; free space is checked on the output, `/var/tmp`, and `/flash` filesystems. These remain sampled limits, not quotas. Output inside the vendor support directories is rejected.
+
+Vendor workspaces and archives remain in their original locations, including after failures; the wrapper never deletes vendor evidence. Review and remove the specific generated files under your evidence-handling procedure. Avoid concurrent vendor support collections. On this build filenames have minute precision; an overwritten pre-existing path is conservatively rejected as not new. A default collector retry does not reuse an earlier bundle.
 
 ## Requirements and collection stages
 
@@ -49,7 +68,8 @@ Use a NetScaler root shell with native FreeBSD `stat -f` or an installed Python 
 6. Log/core inventory; raw copies only with `-S`.
 7. Log heuristics. Default output omits raw lines, usernames and session IDs.
 8. Live-source hash inventories; these are not an atomic filesystem snapshot.
-9. Optional raw evidence tar, captured-content hashes, verified outer archive and checksum.
+9. Optional raw evidence tar and captured-content hashes.
+10. Optional vendor support bundle, followed by verified outer packaging and checksum.
 
 Filesystem names containing non-printable/non-ASCII bytes or `|` are omitted and mark the run partial. Spaces are supported. Names beginning `nsir_` are pruned to avoid collecting this run, other concurrent runs and older collections. This deliberately creates a coverage gap for unrelated files with that prefix; inspect such paths separately during an investigation. Hardlink/symlink-directory aliases are represented in a mapping when multiple candidates refer to the same captured inode; leaf symlinks are not copied as regular evidence files.
 
@@ -66,6 +86,7 @@ nsir_<host>_<UTC>.<random>/
   00_collection.log
   system/ netscaler_cli/ timeline/ checks/ logs_analysis/ hashes/
   files/                   # raw evidence only with -S
+  support_bundle/          # sensitive vendor output only with --support-bundle
 ```
 
 | Exit | Meaning |
