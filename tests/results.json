@@ -1,0 +1,153 @@
+{
+  "script_sha256": "c73c861a7a58a68605406590d2731789e6429060f3bea8c72ee80b66e45b562a",
+  "environment": "isolated Linux fixture with FreeBSD/CLI shims",
+  "tests": [
+    {
+      "test": "test_archive_failure_preserves",
+      "exit": 1,
+      "seconds": 0.27,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_ascii_control_not_cb2",
+      "exit": 0,
+      "seconds": 0.26,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_changing_file_partial",
+      "exit": 2,
+      "seconds": 0.43,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_cli_semantic_errors_partial",
+      "exit": 2,
+      "seconds": 0.42,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_concurrent_runs",
+      "exit": 0,
+      "seconds": 0.27,
+      "archives": 2,
+      "staging": 0
+    },
+    {
+      "test": "test_corrupt_archive_rejected",
+      "exit": 1,
+      "seconds": 0.26,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_deadline_preserves",
+      "exit": 124,
+      "seconds": 2.02,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_default_privacy_and_archive",
+      "exit": 0,
+      "seconds": 0.28,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_evidence_failure_preserves",
+      "exit": 1,
+      "seconds": 0.39,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_free_space_limit",
+      "exit": 1,
+      "seconds": 0.02,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_full_collection_explicit",
+      "exit": 0,
+      "seconds": 0.42,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_hash_failure_preserves",
+      "exit": 1,
+      "seconds": 0.26,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_interrupt_preserves",
+      "exit": 143,
+      "seconds": 2.01,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_keep_staging",
+      "exit": 0,
+      "seconds": 0.27,
+      "archives": 1,
+      "staging": 1
+    },
+    {
+      "test": "test_missing_cli_partial",
+      "exit": 2,
+      "seconds": 0.26,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_python_stat_fallback",
+      "exit": 0,
+      "seconds": 0.36,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_sensitive_options_require_opt_in",
+      "exit": 1,
+      "seconds": 0.01,
+      "archives": 0,
+      "staging": 0
+    },
+    {
+      "test": "test_sessions_and_source_grouping",
+      "exit": 2,
+      "seconds": 0.29,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_size_limit_preserves",
+      "exit": 1,
+      "seconds": 1.03,
+      "archives": 0,
+      "staging": 1
+    },
+    {
+      "test": "test_timeline_failure_partial",
+      "exit": 2,
+      "seconds": 0.26,
+      "archives": 1,
+      "staging": 0
+    },
+    {
+      "test": "test_unusual_names_partial",
+      "exit": 2,
+      "seconds": 0.43,
+      "archives": 1,
+      "staging": 0
+    }
+  ]
+}
