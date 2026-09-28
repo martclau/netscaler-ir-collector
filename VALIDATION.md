@@ -1,5 +1,76 @@
 # Collector validation
 
+## Collector v1.4 validation
+
+Assessed 2026-09-28. The native-integrity, MAC_Veriexec, deleted-executable, hard-link timeline and expanded platform/persistence additions pass the isolated regression suite and focused native acceptance on NetScaler 14.1 build 73.37. This remains experimental and does not establish production-load or cross-build compatibility.
+
+### Artifact and synthetic regression
+
+- [Collector](ns_ir_collect.sh) v1.4 SHA-256: `0086588cfebbdfd31f81a2caca2a6a98243e022b332d3fd64ca11a4b3192ac99` on the host and guest.
+- [Regression suite](tests/test_collector.py): 32 test methods and 36 fixture executions passed in 27.8 seconds. [Results](tests/results.json) identify the tested script hash.
+- `sh -n` and `git diff --check` passed. ShellCheck was not installed, so no v1.4 ShellCheck result is claimed.
+- Fixtures now cover signed-manifest hashing/copy gating, `sigchk` summary and path handling, portal-check output, rotated Veriexec failures, bounded implicated-file capture, orphan-process metadata, loader and unified-configuration collection, twelve-field timelines with `st_nlink`, and both native-stat and Python fallback formats.
+
+The tests retain raw native-integrity command output, matching log lines, manifests, loader configuration, unified configuration and implicated files only with `-S`. Default fixtures retain summaries and paths but not raw command/log content. No fixture process is dumped.
+
+### Native NetScaler 14.1-73.37 result
+
+Target: `NetScaler-VPX-14.1-73.37-fresh`, UUID `e487f2ff-64ed-4e26-83d5-f4cfe966909e`, 4,096 MB RAM, 2 vCPUs and one host-only `vboxnet0` adapter. SSH reported **NetScaler NS14.1 build 73.37.nc**, dated September 25, 2026. No traffic feature, authentication policy or appliance configuration was changed.
+
+The first native attempt exposed two FreeBSD 11 awk parser incompatibilities: a slash inside an awk character class in the existing process-marker check and a slash inside the new Veriexec helper-path expression. Both were rewritten without those character classes. The full synthetic suite passed again, and neither error appeared in the final native runs.
+
+Metadata invocation:
+
+```sh
+sh /var/tmp/ns_ir_collect_v1.4.sh -o /var/tmp \
+  -C V14_1_73_37_V14_NATIVE_FIXED -d 0 -k -t 600 -m 512
+```
+
+| Check | Observed |
+| --- | --- |
+| Duration / result | 52.5 seconds; exit 2 only because `kldstat` was absent (127) |
+| Outer archive | 3,033,169 bytes; SHA-256 `c54943d3e31f6273accf5cb56675fb6d71fa197cb71264b2c58930aebf22f510`; independent readback matched |
+| Timeline | 61,947 rows; 12 fields; native link count present and numeric |
+| Signed manifests | `/netscaler`, `/var/python` and `/var/perl5` manifests present; SHA-256, byte count and line count recorded |
+| Vendor `sigchk` | Exit 0; summary: 1,177 of 1,213 checked binaries verified; 36 paths reported as unverified |
+| Portal checker | Exit 0; three output lines; zero failure-keyword lines |
+| MAC_Veriexec | Zero matching integrity-failure log lines |
+| Deleted executables | Zero `kern.proc.pathname` orphan PIDs |
+| Platform metadata | `dmesg`, `sysctl security`, `sysctl netscaler` and `sysctl hw` all exited 0; default members retained only digest/count summaries |
+| Persistence | Loader configuration hash/size recorded; unified configuration contained one system-account entry |
+| Raw evidence | Absent, as required in metadata mode |
+
+The 36 `sigchk` paths included boot, HSM and VMware components on this fresh appliance. They are therefore classified as INFO baseline-comparison leads, not integrity failures. The exact set is build/deployment dependent and is not promoted to an allowlist. The three signed-manifest hashes and loader hash are recorded in the native output but are not vendor attestations.
+
+### Scoped sensitive validation
+
+The first `-S -d 0` pass used the default 512 MiB limit. Stage 9 produced a structurally valid approximately 438 MiB evidence tar, but staging plus the growing compressed outer archive exceeded the combined monitored budget. The collector stopped, returned fatal resource-limit status and preserved staging. Its exact generated paths were removed after inspection.
+
+The final pass increased only the output budget:
+
+```sh
+sh /var/tmp/ns_ir_collect_v1.4.sh -o /var/tmp \
+  -C V14_1_73_37_V14_SENSITIVE_700 -S -d 0 -t 600 -m 700
+```
+
+| Check | Observed |
+| --- | --- |
+| Duration / result | 76.3 seconds; verified archive published with truthful partial status |
+| Outer archive | 216,282,320 bytes; SHA-256 `bfd15b0688f475d19444ab5f0d86262ce18ec5a1cc32af3a023462cd535c1d0e`; independent readback matched |
+| Structure | Outer gzip/tar valid; 144 outer members; staging removed after verified packaging |
+| New raw outputs | Raw `sigchk`, portal-check, Veriexec, `dmesg` and scoped sysctl members present only under `-S` |
+| New copied sources | All three signed manifests, `/flash/boot/loader.conf` and `/flash/nsconfig/unified.conf` present in the evidence tar |
+| Inner evidence | Tar listing validated; source-before and captured hashes differed for one changing live file, correctly producing `evidence_changed_during_capture` |
+| Expected partials | Missing `kldstat`; unlicensed/unconfigured CLI objects; absent crontabs; source files over the 20 MiB per-file cap; one changing source |
+
+`lastlogin`, `lastcomm` and `atq` were unavailable on this appliance and were explicitly skipped. Automatic `gcore`, memory dumping and configuration changes were not attempted. The guest clock reported September 24 while the host assessment date was September 28, so guest-derived timestamps do not establish wall-clock UTC.
+
+After recording these sanitized measurements, all task-generated staging directories, outer/partial archives, checksum sidecars, the temporary member list and the transferred collector were removed by exact path. No raw appliance evidence was exported or retained. The VM was powered off with its host-only network unchanged.
+
+### Remaining v1.4 limits
+
+`sigchk` reports unverified rather than necessarily modified files and requires a clean same-build comparison. Veriexec path extraction deliberately ignores malformed/concatenated records. Deleted-executable detection depends on the FreeBSD 11 `procstat` diagnostic format and records metadata only. Optional account/history commands vary by build. `-S` can require substantially more than the nominal evidence-tar size because both inner and outer archives coexist; size limits are sampled rather than hard quotas. The prior 120-day performance limitation, live-snapshot races, textual IPv6 limitations and lack of representative busy/HA/MPX/SDX validation remain.
+
 ## Collector v1.3 validation
 
 Assessed 2026-09-28. The incident-response additions pass the isolated synthetic regression suite and native metadata plus scoped-sensitive acceptance on NetScaler 14.1 build 73.37. Broad 120-day sensitive collection exposed a performance limit described below. This remains experimental, not production-certified.

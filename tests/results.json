@@ -1,53 +1,53 @@
 {
-  "script_sha256": "0c3f7cb6baa94a706c9743e957aea185cb779f94e407f32f58dc0bbfa4fbbb74",
+  "script_sha256": "0086588cfebbdfd31f81a2caca2a6a98243e022b332d3fd64ca11a4b3192ac99",
   "environment": "isolated Linux fixture with FreeBSD/CLI shims",
   "tests": [
     {
       "test": "test_alternate_php_extension_alone_is_not_high",
       "exit": 0,
-      "seconds": 0.32,
+      "seconds": 0.36,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_archive_failure_preserves",
       "exit": 1,
-      "seconds": 0.28,
+      "seconds": 0.32,
       "archives": 0,
       "staging": 1
     },
     {
       "test": "test_ascii_control_not_cb2",
       "exit": 0,
-      "seconds": 0.29,
+      "seconds": 0.34,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_changing_file_partial",
       "exit": 2,
-      "seconds": 0.48,
+      "seconds": 0.56,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_cli_semantic_errors_partial",
       "exit": 2,
-      "seconds": 0.47,
+      "seconds": 0.53,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_concurrent_runs",
       "exit": 0,
-      "seconds": 0.3,
+      "seconds": 0.34,
       "archives": 2,
       "staging": 0
     },
     {
       "test": "test_corrupt_archive_rejected",
       "exit": 1,
-      "seconds": 0.29,
+      "seconds": 0.32,
       "archives": 0,
       "staging": 1
     },
@@ -61,14 +61,14 @@
     {
       "test": "test_default_privacy_and_archive",
       "exit": 0,
-      "seconds": 0.31,
+      "seconds": 0.33,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_evidence_failure_preserves",
       "exit": 1,
-      "seconds": 0.44,
+      "seconds": 0.49,
       "archives": 0,
       "staging": 1
     },
@@ -82,28 +82,28 @@
     {
       "test": "test_full_collection_explicit",
       "exit": 0,
-      "seconds": 0.47,
+      "seconds": 0.53,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_hash_failure_preserves",
       "exit": 1,
-      "seconds": 0.29,
+      "seconds": 0.33,
       "archives": 0,
       "staging": 1
     },
     {
       "test": "test_incident_chain_coverage_default_is_aggregate_only",
       "exit": 0,
-      "seconds": 0.34,
+      "seconds": 0.39,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_incident_chain_coverage_sensitive_copies_configs_and_raw_matches",
       "exit": 0,
-      "seconds": 0.58,
+      "seconds": 0.66,
       "archives": 1,
       "staging": 0
     },
@@ -124,21 +124,21 @@
     {
       "test": "test_keep_staging",
       "exit": 0,
-      "seconds": 0.3,
+      "seconds": 0.34,
       "archives": 1,
       "staging": 1
     },
     {
       "test": "test_missing_cli_partial",
       "exit": 2,
-      "seconds": 0.29,
+      "seconds": 0.33,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_python_stat_fallback",
       "exit": 0,
-      "seconds": 0.37,
+      "seconds": 0.4,
       "archives": 1,
       "staging": 0
     },
@@ -152,7 +152,7 @@
     {
       "test": "test_sessions_and_source_grouping",
       "exit": 2,
-      "seconds": 0.29,
+      "seconds": 0.33,
       "archives": 1,
       "staging": 0
     },
@@ -166,14 +166,14 @@
     {
       "test": "test_support_absent_is_partial",
       "exit": 2,
-      "seconds": 0.29,
+      "seconds": 0.33,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_default_does_not_invoke",
       "exit": 0,
-      "seconds": 0.29,
+      "seconds": 0.34,
       "archives": 1,
       "staging": 0
     },
@@ -187,35 +187,35 @@
     {
       "test": "test_support_failures_are_partial",
       "exit": 2,
-      "seconds": 0.3,
+      "seconds": 0.35,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_failures_are_partial",
       "exit": 2,
-      "seconds": 0.3,
+      "seconds": 0.34,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_failures_are_partial",
       "exit": 2,
-      "seconds": 0.31,
+      "seconds": 0.35,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_failures_are_partial",
       "exit": 2,
-      "seconds": 0.3,
+      "seconds": 0.34,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_failures_are_partial",
       "exit": 2,
-      "seconds": 0.3,
+      "seconds": 0.35,
       "archives": 1,
       "staging": 0
     },
@@ -229,28 +229,28 @@
     {
       "test": "test_support_success_independent_opt_in",
       "exit": 0,
-      "seconds": 0.32,
+      "seconds": 0.35,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_support_timeout_continues_packaging",
       "exit": 2,
-      "seconds": 1.31,
+      "seconds": 1.34,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_timeline_failure_partial",
       "exit": 2,
-      "seconds": 0.29,
+      "seconds": 0.33,
       "archives": 1,
       "staging": 0
     },
     {
       "test": "test_unusual_names_partial",
       "exit": 2,
-      "seconds": 0.48,
+      "seconds": 0.55,
       "archives": 1,
       "staging": 0
     }

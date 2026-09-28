@@ -55,15 +55,22 @@ class Fixture:
                   'od gzip tail mv rm tar cp uname touch chmod ln').split():
             binary(root, n)
         (root/'bin/stat').rename(root/'bin/stat-real')
-        put(root, '/sbin/stat', '#!/bin/sh\nfmt=$2; shift; shift\ncase \"$fmt\" in %m) exec /bin/stat-real -c %Y \"$@\";; %d:%i) exec /bin/stat-real -c %d:%i \"$@\";; esac\nexec /bin/stat-real --printf="0|%n|%i|%A|%u|%g|%s|%X|%Y|%Z|%W\\n" -- "$@"\n', 0o755)
-        put(root, '/sbin/sysctl', f'#!/bin/sh\necho "{{ sec = {int(time.time())}, usec = 0 }}"\n', 0o755)
+        put(root, '/sbin/stat', '#!/bin/sh\nfmt=$2; shift; shift\ncase \"$fmt\" in %m) exec /bin/stat-real -c %Y \"$@\";; %d:%i) exec /bin/stat-real -c %d:%i \"$@\";; esac\nexec /bin/stat-real --printf="0|%n|%i|%h|%A|%u|%g|%s|%X|%Y|%Z|%W\\n" -- "$@"\n', 0o755)
+        put(root, '/sbin/sysctl', f'''#!/bin/sh
+case "$*" in
+  *kern.boottime*) echo "{{ sec = {int(time.time())}, usec = 0 }}";;
+  security|netscaler|hw) echo "$1.fixture={SECRET}";;
+  *) exit 1;;
+esac
+''', 0o755)
         put(root, '/sbin/nscli', '#!/bin/sh\necho "NetScaler NS14.1 Build 73.30 synthetic fixture"\n', 0o755)
         put(root, '/sbin/ps', '#!/bin/sh\necho "USER PID PPID COMM"\necho "root 1 0 /sbin/init"\n', 0o755)
         put(root, '/sbin/procstat', '#!/bin/sh\necho "PID COMM OSREL PATH"\n', 0o755)
         put(root, '/sbin/hostname', '#!/bin/sh\necho fixture\n', 0o755)
         for tool in ['uptime', 'sockstat', 'netstat', 'arp', 'ifconfig', 'who', 'last',
-                     'fstat', 'kldstat', 'mount', 'ntpq', 'crontab']:
+                     'lastlogin', 'lastcomm', 'atq', 'fstat', 'kldstat', 'mount', 'ntpq', 'crontab']:
             put(root, '/sbin/'+tool, '#!/bin/sh\nexit 0\n', 0o755)
+        put(root, '/sbin/dmesg', f'#!/bin/sh\necho "synthetic dmesg {SECRET}"\n', 0o755)
         put(root, '/sbin/ls', '#!/bin/sh\ncase "$1" in -laT) shift; exec /bin/ls -la "$@";; -lT) shift; exec /bin/ls -l "$@";; esac\nexec /bin/ls "$@"\n', 0o755)
         put(root, '/sbin/df', '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted"\nshift\nfor path do echo "fixture 10000000 1 9999999 1% /"; done\n', 0o755)
         put(root, '/netscaler/ns_gui/library.php', "<?php $marker = '-----BEGIN PRIVATE KEY-----'; ?>\n")
@@ -71,6 +78,9 @@ class Fixture:
         put(root, '/etc/auth.conf', '# synthetic fixture\n')
         put(root, '/etc/crontab', '# empty fixture\n')
         put(root, '/etc/ntp.conf', '# empty fixture\n')
+        put(root, '/flash/boot/loader.conf', 'synthetic_loader=YES\n')
+        put(root, '/netscaler/.signedexe.manifest', 'synthetic signed executable manifest\n')
+        put(root, '/var/python/.signedexe.manifest', 'synthetic python manifest\n')
         put(root, '/etc/master.passwd', f'root:{SECRET}:0:0::0:0:root:/root:/bin/sh\n')
         put(root, '/flash/nsconfig/ns.conf', f'set ns hostName fixture\nadd system user fixture {SECRET}\n')
         put(root, '/flash/nsconfig/ssl/test.key', f'-----BEGIN PRIVATE KEY-----\n{SECRET}\n-----END PRIVATE KEY-----\n')
@@ -94,6 +104,10 @@ class Fixture:
         if incident_chain:
             put(root, '/sbin/ps', '''#!/bin/sh
 case "$*" in
+  *pid,ppid,user,lstart,etime,state,comm*)
+    echo "PID PPID USER STARTED ELAPSED STATE COMM"
+    echo "4242 1 nobody synthetic_start 00:10 S orphaned"
+    ;;
   *pid,ppid,user,command*)
     echo "PID PPID USER COMMAND"
     echo "200 1 root /netscaler/ns_monuploadd_err.pl -WR /var/log/htt/stage"
@@ -111,6 +125,11 @@ case "$*" in
 esac
 ''', 0o755)
             put(root, '/sbin/sockstat', '#!/bin/sh\necho "root proc 200 7 tcp4 192.0.2.10:1234 203.0.113.99:443"\n', 0o755)
+            put(root, '/sbin/procstat', '#!/bin/sh\necho "PID COMM OSREL PATH"\necho "procstat: sysctl: kern.proc.pathname: 4242: No such file or directory" >&2\n', 0o755)
+            put(root, '/var/tmp/failed.bin', 'synthetic integrity failure artifact\n')
+            put(root, '/netscaler/sigchk', '#!/bin/sh\n[ "$1" = check ] || exit 2\necho "info: any files reported below are unverified:"\necho /var/tmp/failed.bin\necho "summary: verified 10 out of 11 checked binaries."\n', 0o755)
+            put(root, '/netscaler/portal_core_checksum_check.pl', '#!/bin/sh\necho "checksum mismatch: synthetic fixture"\n', 0o755)
+            put(root, '/var/netscaler/logon/LogonPoint/checksum_fixture.txt', 'synthetic portal hashes\n')
             put(root, '/sbin/nscli', '''#!/bin/sh
 case "$*" in
   *"show ns tcpparam"*) echo "Enhanced ISN Generation: ENABLED";;
@@ -134,7 +153,8 @@ Alias /vpn/theme/receiver.min.css /var/netscaler/.ctxs.receiver
                 f.write('add lb vserver dns DNS 192.0.2.23 53 -dns64 ENABLED\n')
                 f.write('add lsn group nat64-group -nattype NAT64\n')
             put(root, '/var/log/messages', 'pitboss PPE missed too many heartbeats and NSPPE unexpectedly died\n'
-                'ns_monuploadd_err.pl -WR ${IFS} b64decode /var/log/htt/stage\n')
+                'ns_monuploadd_err.pl -WR ${IFS} b64decode /var/log/htt/stage\n'
+                'kernel: MAC/veriexec: fingerprint does not match loaded value (file=/var/tmp/failed.bin fsid=1 fileid=2)\n')
             put(root, '/var/log/nsvpn.log', 'outbound connection to 203.0.113.99\n')
             put(root, '/var/log/httpaccess-vpn.log',
                 'GET /vpn/theme/receiver.min.css HTTP/1.1 User-Agent: '+('A'*96)+'\n')
@@ -223,11 +243,19 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(d['logs_analysis/session_ip_mismatch.txt'],b'')
         self.assertEqual(d['logs_analysis/cb2_nonprintable_aaa.txt'],b'matching_lines=1\n')
         self.assertEqual(d['00_TRIAGE_FLAGS.txt'].count(b'[HIGH]'),7)
+        fields=d['timeline/bodyfile.txt'].splitlines()[0].split(b'|')
+        self.assertEqual(len(fields),12); self.assertGreaterEqual(int(fields[3]),1)
+        self.assertIn(b'/netscaler/.signedexe.manifest\tsha256=',d['checks/native_signed_manifests.txt'])
+        self.assertIn(b'path=/flash/boot/loader.conf',d['checks/boot_loader_conf.txt'])
+        self.assertIn(b'output_sha256=',d['system/dmesg.txt'])
+        self.assertNotIn(SECRET.encode(),d['system/dmesg.txt'])
         self.assertFalse(f.staging)
 
     def test_full_collection_explicit(self):
         f=self.fixture(); self.assertEqual(f.run('-S'),0,f.result.stderr)
         d=f.records[0]['data']; self.assertIn('files/evidence_files.tar',d)
+        self.assertIn(SECRET.encode(),d['system/dmesg.txt'])
+        self.assertIn(SECRET.encode(),d['system/sysctl_security.txt'])
         with tarfile.open(fileobj=io.BytesIO(d['files/evidence_files.tar'])) as t:
             self.assertIn(SECRET.encode(),t.extractfile('flash/nsconfig/ssl/test.key').read())
             for line in d['files/evidence_files.sha256'].decode().splitlines():
@@ -319,6 +347,17 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(d['logs_analysis/http_css_receiver_requests.txt'],b'matching_lines=1\n')
         self.assertEqual(d['logs_analysis/http_base64_user_agents.txt'],b'matching_lines=1\n')
         self.assertEqual(d['logs_analysis/httpd_reload_indicators.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['checks/sigchk_unverified_paths.txt'],b'/var/tmp/failed.bin\n')
+        self.assertIn(b'absolute_path_lines=1',d['checks/sigchk_check.txt'])
+        self.assertIn(b'summary: verified 10 out of 11 checked binaries.',d['checks/sigchk_check.txt'])
+        self.assertNotIn('checks/sigchk_check_raw.txt',d)
+        self.assertIn(b'failure_keyword_lines=1',d['checks/portal_core_checksum_check.txt'])
+        self.assertNotIn('checks/portal_core_checksum_check_raw.txt',d)
+        self.assertEqual(d['logs_analysis/veriexec_failures.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/veriexec_failed_paths.txt'],b'/var/tmp/failed.bin\n')
+        self.assertNotIn('logs_analysis/veriexec_failures_raw.txt',d)
+        self.assertEqual(d['checks/orphan_executable_pids.txt'],b'4242\n')
+        self.assertIn(b'4242',d['checks/orphan_executable_process_metadata.txt'])
         self.assertIn(b'/etc/httpd.conf:',d['checks/httpd_conf_php_engine_on.txt'])
         self.assertIn(b'/flash/nsconfig/httpd.conf:',d['checks/httpd_conf_php_extensions.txt'])
         self.assertIn(b'non-PHP Files block',d['checks/httpd_conf_files_php_handler.txt'])
@@ -338,10 +377,16 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(f.run('-S','-i','/tmp/runtime-iocs.txt'),0,f.result.stderr)
         d=f.records[0]['data']
         self.assertIn(b'203.0.113.99',d['logs_analysis/ioc_log_hits.txt'])
+        self.assertIn(b'/var/tmp/failed.bin',d['checks/sigchk_check_raw.txt'])
+        self.assertIn(b'checksum mismatch',d['checks/portal_core_checksum_check_raw.txt'])
+        self.assertIn(b'MAC/veriexec:',d['logs_analysis/veriexec_failures_raw.txt'])
         with tarfile.open(fileobj=io.BytesIO(d['files/evidence_files.tar'])) as t:
             names=t.getnames()
             self.assertIn('etc/httpd.conf',names)
             self.assertIn('flash/nsconfig/httpd.conf',names)
+            self.assertIn('flash/boot/loader.conf',names)
+            self.assertIn('netscaler/.signedexe.manifest',names)
+            self.assertIn('var/tmp/failed.bin',names)
             self.assertNotIn('tmp/runtime-iocs.txt',names)
 
     def test_invalid_runtime_ioc_file_is_fatal(self):

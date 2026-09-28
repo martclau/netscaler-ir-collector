@@ -1,5 +1,5 @@
 #!/bin/sh
-# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.3
+# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.4
 # Usage: sh ns_ir_collect.sh [-o DIR] [-C CASE] [-d DAYS] [-i IOC_FILE] [-k] [-S] [-cnb]
 #        [-t SECONDS] [-m MAX_MB] [-r RESERVE_MB]
 #        [--support-bundle] [--support-timeout=SECONDS]
@@ -28,7 +28,7 @@ umask 077
 # Do not leave collector/child core dumps containing in-memory source data.
 # shellcheck disable=SC3045 # FreeBSD sh and supported test shells provide -c.
 ulimit -c 0
-VERSION=1.3
+VERSION=1.4
 OUTPARENT=/var/tmp
 CASEID=unspecified
 DAYS=120
@@ -245,6 +245,30 @@ run() {
         if grep -qiE '^[[:space:]]*(ERROR:|ERROR |Invalid command|Permission denied|Access denied)' "$_f"; then partial "cli_error:$_rel"; fi;;
     esac
 }
+# Run platform commands while preserving the default privacy boundary. Default
+# mode retains provenance and a digest/count summary; -S retains command text.
+run_platform() {
+    _rel=$1; shift
+    _f=$OUT/$_rel
+    _raw=$OUT/.platform_command_raw
+    timeout -k 2 60 sh -c "$*" < /dev/null > "$_raw" 2>&1
+    _rc=$?
+    {
+        printf '# cmd: %s\n' "$*"
+        printf '# utc: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        if [ "$SENSITIVE" -eq 1 ]; then
+            cat "$_raw"
+        else
+            _rh=$(hash1 "$_raw") || _rh=unavailable
+            printf 'output_sha256=%s\n' "$_rh"
+            printf 'output_bytes=%s\n' "$(wc -c < "$_raw" 2>/dev/null || echo unavailable)"
+            printf 'output_lines=%s\n' "$(wc -l < "$_raw" 2>/dev/null || echo unavailable)"
+        fi
+        printf '\n# exit: %s\n' "$_rc"
+    } > "$_f" || fatal output_write
+    rm -f "$_raw"
+    if [ "$_rc" -ne 0 ]; then partial "command_failed:$_rel:$_rc"; fi
+}
 # grep's no-match is normal; operational errors are not. Used in pipelines too.
 checked_grep() { grep "$@"; _grc=$?; [ "$_grc" -le 1 ] || partial grep_failed; return "$_grc"; }
 # Scan only representable names; report omitted names separately before scans.
@@ -355,6 +379,87 @@ log "NetScaler IR collector v$VERSION -> $OUT (sensitive=$SENSITIVE)"
     fi
 } > "$OUT/00_metadata.txt" || fatal metadata_write
 hash1 "$SELF" >/dev/null || fatal script_hash_failed
+
+# -------------------------------------- 0. native integrity preflight --
+# Run vendor integrity tools before broad filesystem reads, hashing or copies.
+# Some NetScaler builds emit Veriexec messages when executables are read.
+stage integrity "native integrity preflight"
+: > "$OUT/checks/native_signed_manifests.txt"
+: > "$OUT/.native_manifest_paths"
+for manifest in /netscaler/.signedexe.manifest /var/python/.signedexe.manifest /var/perl5/.signedexe.manifest; do
+    if [ -f "$manifest" ] && [ ! -L "$manifest" ]; then
+        mh=$(hash1 "$manifest") || { partial native_manifest_hash_failed; continue; }
+        mb=$(wc -c < "$manifest" 2>/dev/null) || { partial native_manifest_size_failed; continue; }
+        ml=$(wc -l < "$manifest" 2>/dev/null) || { partial native_manifest_count_failed; continue; }
+        printf '%s\tsha256=%s\tbytes=%s\tlines=%s\n' "$manifest" "$mh" "$mb" "$ml" \
+            >> "$OUT/checks/native_signed_manifests.txt" || fatal output_write
+        printf '%s\n' "$manifest" >> "$OUT/.native_manifest_paths" || fatal output_write
+    else
+        printf '%s\tpresent=0\n' "$manifest" >> "$OUT/checks/native_signed_manifests.txt" || fatal output_write
+    fi
+done
+add_copy_lines "$OUT/.native_manifest_paths"
+
+: > "$OUT/checks/native_integrity_tools.txt"
+native_integrity_check() {
+    _label=$1; _tool=$2; _arg=${3:-}; _raw=$OUT/.$_label.raw
+    if [ ! -x "$_tool" ]; then
+        printf 'present=0\n' > "$OUT/checks/$_label.txt" || fatal output_write
+        status skipped "native integrity tool unavailable:$_tool"
+        return 0
+    fi
+    _th=$(hash1 "$_tool") || { partial "native_tool_hash_failed:$_label"; _th=unavailable; }
+    printf '%s\tsha256=%s\n' "$_tool" "$_th" >> "$OUT/checks/native_integrity_tools.txt" || fatal output_write
+    if [ -n "$_arg" ]; then
+        timeout -k 2 120 "$_tool" "$_arg" < /dev/null > "$_raw" 2>&1
+    else
+        timeout -k 2 120 "$_tool" < /dev/null > "$_raw" 2>&1
+    fi
+    _rc=$?
+    _lines=$(wc -l < "$_raw" 2>/dev/null || echo 0)
+    _paths=$(awk '/^\// {n++} END {print n+0}' "$_raw")
+    _fail=$(grep -aiEc 'mismatch|failed|invalid|corrupt|not[[:space:]]+match|error' "$_raw" 2>/dev/null || :)
+    {
+        echo 'present=1'
+        echo "tool_sha256=$_th"
+        echo "exit=$_rc"
+        echo "output_lines=${_lines:-0}"
+        echo "absolute_path_lines=${_paths:-0}"
+        echo "failure_keyword_lines=${_fail:-0}"
+    } > "$OUT/checks/$_label.txt" || fatal output_write
+    if [ "$_label" = sigchk_check ]; then
+        grep -aE '^summary:' "$_raw" | tail -n 1 >> "$OUT/checks/$_label.txt" 2>/dev/null || :
+        awk '/^\// && $0 !~ /[|[:cntrl:]]/ {print}' "$_raw" | sort -u \
+            > "$OUT/checks/sigchk_unverified_paths.txt" || fatal output_write
+    fi
+    if [ "$SENSITIVE" -eq 1 ]; then
+        mv "$_raw" "$OUT/checks/${_label}_raw.txt" || fatal output_write
+    else
+        rm -f "$_raw"
+    fi
+    if [ "$_rc" -ne 0 ]; then partial "native_integrity_command_failed:$_label:$_rc"; fi
+}
+
+native_integrity_check sigchk_check /netscaler/sigchk check
+[ -f "$OUT/checks/sigchk_unverified_paths.txt" ] || : > "$OUT/checks/sigchk_unverified_paths.txt"
+SIGCHK_HITS=$(wc -l < "$OUT/checks/sigchk_unverified_paths.txt" | tr -d ' ')
+[ "${SIGCHK_HITS:-0}" -eq 0 ] || flag INFO "$SIGCHK_HITS path(s) are unverified according to vendor sigchk; compare a clean same-build baseline - checks/sigchk_unverified_paths.txt"
+
+: > "$OUT/checks/portal_checksum_manifests.txt"
+: > "$OUT/.portal_manifest_paths"
+for portal_manifest in /var/netscaler/logon/LogonPoint/checksum_*.txt; do
+    [ -f "$portal_manifest" ] && [ ! -L "$portal_manifest" ] || continue
+    ph=$(hash1 "$portal_manifest") || { partial portal_manifest_hash_failed; continue; }
+    pb=$(wc -c < "$portal_manifest" 2>/dev/null) || { partial portal_manifest_size_failed; continue; }
+    printf '%s\tsha256=%s\tbytes=%s\n' "$portal_manifest" "$ph" "$pb" \
+        >> "$OUT/checks/portal_checksum_manifests.txt" || fatal output_write
+    printf '%s\n' "$portal_manifest" >> "$OUT/.portal_manifest_paths" || fatal output_write
+done
+add_copy_lines "$OUT/.portal_manifest_paths"
+native_integrity_check portal_core_checksum_check /netscaler/portal_core_checksum_check.pl
+PORTAL_FAIL=$(sed -n 's/^failure_keyword_lines=//p' "$OUT/checks/portal_core_checksum_check.txt")
+[ "${PORTAL_FAIL:-0}" -eq 0 ] || flag MEDIUM "$PORTAL_FAIL portal checksum result line(s) contain failure keywords; inspect raw output with -S"
+
 # Some ADC builds omit stat. Use an isolated Python 3 lstat adapter when available.
 STAT=$(command -v stat 2>/dev/null || :)
 if [ -z "$STAT" ]; then
@@ -380,10 +485,10 @@ for path in sys.argv[3:]:
             print('%d:%d' % (st.st_dev, st.st_ino))
         elif fmt == '%m':
             print(int(st.st_mtime))
-        elif fmt == '0|%N|%i|%Sp|%u|%g|%z|%a|%m|%c|%B':
-            print('|'.join(map(str, [0, path, st.st_ino, stat.filemode(st.st_mode),
-                st.st_uid, st.st_gid, st.st_size, int(st.st_atime), int(st.st_mtime),
-                int(st.st_ctime), int(getattr(st, 'st_birthtime', 0))])))
+        elif fmt == '0|%N|%i|%l|%Sp|%u|%g|%z|%a|%m|%c|%B':
+            print('|'.join(map(str, [0, path, st.st_ino, st.st_nlink,
+                stat.filemode(st.st_mode), st.st_uid, st.st_gid, st.st_size, int(st.st_atime),
+                int(st.st_mtime), int(st.st_ctime), int(getattr(st, 'st_birthtime', 0))])))
         else:
             rc = 1
     except OSError:
@@ -396,8 +501,8 @@ else
     echo 'stat_backend=native_stat' >> "$OUT/00_metadata.txt"
 fi
 # Reject unsupported native stat before interpreting timeline fields.
-"$STAT" -f '0|%N|%i|%Sp|%u|%g|%z|%a|%m|%c|%B' "$SELF" > "$OUT/.stat_probe" 2>/dev/null || fatal incompatible_stat
-awk -F'|' 'NF != 11 || $3 !~ /^[0-9]+$/ {bad=1} END {exit bad || NR == 0}' "$OUT/.stat_probe" || fatal incompatible_stat
+"$STAT" -f '0|%N|%i|%l|%Sp|%u|%g|%z|%a|%m|%c|%B' "$SELF" > "$OUT/.stat_probe" 2>/dev/null || fatal incompatible_stat
+awk -F'|' 'NF != 12 || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ {bad=1} END {exit bad || NR == 0}' "$OUT/.stat_probe" || fatal incompatible_stat
 rm "$OUT/.stat_probe"
 
 scan_pattern() {
@@ -421,6 +526,10 @@ stage 1 "volatile system state"
 run system/date.txt "date -u"
 run system/uptime.txt "uptime"
 run system/boottime.txt "sysctl kern.boottime"
+run_platform system/dmesg.txt "dmesg"
+run_platform system/sysctl_security.txt "sysctl security"
+run_platform system/sysctl_netscaler.txt "sysctl netscaler"
+run_platform system/sysctl_hw.txt "sysctl hw"
 if [ "$SENSITIVE" -eq 1 ]; then
     run system/ps_full.txt "ps auxwwww"
     run system/ps_tree.txt "ps -axwwo pid,ppid,user,lstart,etime,state,command"
@@ -442,7 +551,18 @@ run system/kldstat.txt       "kldstat -v"
 run system/mount.txt "mount"
 run system/df.txt "df -h"
 run system/ntp.txt "ntpq -pn"
-if [ "$SENSITIVE" -eq 1 ]; then run system/ntp_config.txt "cat /etc/ntp.conf"; fi
+if [ "$SENSITIVE" -eq 1 ]; then
+    run system/ntp_config.txt "cat /etc/ntp.conf"
+    for optional_cmd in lastlogin lastcomm atq; do
+        if command -v "$optional_cmd" >/dev/null 2>&1; then
+            run "system/${optional_cmd}.txt" "$optional_cmd"
+        else
+            status skipped "optional command unavailable:$optional_cmd"
+        fi
+    done
+else
+    status skipped 'lastlogin, lastcomm and atq output excluded by default'
+fi
 
 # Interpreters / shells / network tools running as the web server user.
 ps -axwwo user,pid,ppid,comm 2>/dev/null | awk '
@@ -458,6 +578,29 @@ checked_grep -E '[[:space:]](/var/tmp|/tmp|/var/vpn|/var/netscaler|/netscaler/ns
 [ -s "$OUT/checks/procs_from_writable_paths.txt" ] && \
     flag MEDIUM "Process executing from a writable/web path; compare same-build baseline - checks/procs_from_writable_paths.txt"
 
+# procstat reports a kern.proc.pathname error when a running executable has
+# been deleted or is otherwise no longer retrievable. Preserve PIDs/metadata;
+# never attempt automatic process memory dumping.
+awk '
+    {
+        line=$0
+        while (match(line, /kern\.proc\.pathname: [0-9][0-9]*:/)) {
+            hit=substr(line, RSTART, RLENGTH)
+            sub(/^.*: /, "", hit); sub(/:$/, "", hit)
+            print hit
+            line=substr(line, RSTART + RLENGTH)
+        }
+    }' "$OUT/system/procstat_bin.txt" | sort -nu > "$OUT/checks/orphan_executable_pids.txt"
+ORPHAN_COUNT=$(wc -l < "$OUT/checks/orphan_executable_pids.txt" | tr -d ' ')
+: > "$OUT/checks/orphan_executable_process_metadata.txt"
+if [ "${ORPHAN_COUNT:-0}" -gt 0 ]; then
+    ps -axwwo pid,ppid,user,lstart,etime,state,comm 2>/dev/null | \
+        awk 'NR==FNR {wanted[$1]=1; next} FNR==1 || ($1 in wanted)' \
+        "$OUT/checks/orphan_executable_pids.txt" - \
+        > "$OUT/checks/orphan_executable_process_metadata.txt"
+    flag MEDIUM "$ORPHAN_COUNT running process(es) have no retrievable executable pathname - checks/orphan_executable_process_metadata.txt"
+fi
+
 # Inspect arguments for a narrow set of high-signal execution-chain markers.
 # Default output is a count only; -S retains matching process records.
 ps -axwwo pid,ppid,user,command 2>/dev/null | awk '
@@ -472,7 +615,7 @@ else PROC_WR=$(sed 's/^matching_lines=//' "$OUT/checks/procs_monuploadd_wr.txt")
 ps -axwwo pid,ppid,user,command 2>/dev/null | awk '
     NR > 1 {
         line = $0; low = tolower(line)
-        if (low ~ /b64decode|\$\{ifs\}|\/var\/log\/htt([/[:space:]]|$)/) print line
+        if (low ~ /b64decode|\$\{ifs\}|\/var\/log\/htt(\/|[[:space:]]|$)/) print line
     }' | content_sink > "$OUT/checks/procs_decoder_or_staging_markers.txt"
 if [ "$SENSITIVE" -eq 1 ]; then PROC_STAGE=$(wc -l < "$OUT/checks/procs_decoder_or_staging_markers.txt")
 else PROC_STAGE=$(sed 's/^matching_lines=//' "$OUT/checks/procs_decoder_or_staging_markers.txt"); fi
@@ -599,10 +742,10 @@ for d in / /var /flash /tmp; do
     [ ! -s "$OUT/.unsupported" ] || partial unsupported_filenames_omitted
     fx "$d" -print0 > "$OUT/.timeline_paths" 2>/dev/null
     [ -s "$OUT/.timeline_paths" ] || continue
-    xargs -0 "$STAT" -f '0|%N|%i|%Sp|%u|%g|%z|%a|%m|%c|%B' < "$OUT/.timeline_paths" >> "$BODY" 2>/dev/null || partial timeline_stat_failed
+    xargs -0 "$STAT" -f '0|%N|%i|%l|%Sp|%u|%g|%z|%a|%m|%c|%B' < "$OUT/.timeline_paths" >> "$BODY" 2>/dev/null || partial timeline_stat_failed
 done
 rm -f "$OUT/.unsupported" "$OUT/.timeline_paths"
-if ! awk -F'|' 'NF != 11 {bad=1} {for(i=3;i<=11;i++) if(i!=4 && $i !~ /^[0-9]+$/) bad=1} END {exit bad || NR == 0}' "$BODY"; then
+if ! awk -F'|' 'NF != 12 {bad=1} {for(i=3;i<=12;i++) if(i!=5 && $i !~ /^[0-9]+$/) bad=1} END {exit bad || NR == 0}' "$BODY"; then
     partial invalid_or_empty_timeline
     # Never derive copy paths or heuristic results from malformed fields.
     : > "$BODY"
@@ -615,7 +758,7 @@ CUTOFF=$((NOW - DAYS * 86400))
     echo "# ctime_epoch|mtime_epoch|path   (ctime within ${DAYS}d, newest first; logs/cores excluded)"
     echo "# convert: date -r <epoch>.  ctime is much harder to fake than mtime (timestomping)."
     awk -F'|' -v c="$CUTOFF" '
-        $10 >= c && $4 !~ /^d/ && $2 !~ /^\/var\/(log|nslog|core|nstrace)\// { print $10 "|" $9 "|" $2 }' "$BODY" | \
+        $11 >= c && $5 !~ /^d/ && $2 !~ /^\/var\/(log|nslog|core|nstrace)\// { print $11 "|" $10 "|" $2 }' "$BODY" | \
         sort -t'|' -k1,1nr
 } > "$OUT/timeline/recently_changed_ctime.txt"
 
@@ -624,7 +767,7 @@ CUTOFF=$((NOW - DAYS * 86400))
 BOOT=$(sysctl -n kern.boottime 2>/dev/null | sed -n 's/^{ sec = \([0-9]*\),.*/\1/p')
 if [ -n "$BOOT" ]; then
     awk -F'|' -v b="$((BOOT + 900))" '
-        $10 > b && $4 !~ /^d/ && $2 ~ /^\/(netscaler|bin|sbin|lib|libexec|usr\/bin|usr\/sbin|usr\/lib|usr\/libexec)\// { print $2 }' \
+        $11 > b && $5 !~ /^d/ && $2 ~ /^\/(netscaler|bin|sbin|lib|libexec|usr\/bin|usr\/sbin|usr\/lib|usr\/libexec)\// { print $2 }' \
         "$BODY" | sort -u > "$OUT/checks/ramdisk_changed_after_boot.txt"
     [ -s "$OUT/checks/ramdisk_changed_after_boot.txt" ] && \
         flag MEDIUM "$(wc -l < "$OUT/checks/ramdisk_changed_after_boot.txt" | tr -d ' ') ramdisk file(s) (/netscaler, binaries) changed >15 min after boot - checks/ramdisk_changed_after_boot.txt"
@@ -638,6 +781,7 @@ fi
 stage 4 "configuration and persistence"
 if [ "$SENSITIVE" -eq 1 ]; then
 for f in /nsconfig/ns.conf* /flash/nsconfig/ns.conf* /flash/nsconfig/rc.netscaler* \
+         /nsconfig/unified.conf* /flash/nsconfig/unified.conf* /flash/boot/loader.conf \
          /flash/nsconfig/rc.conf* /etc/rc.conf /etc/rc.local /etc/crontab /etc/passwd \
          /etc/group /etc/auth.conf /etc/httpd*.conf /etc/httpd.conf* \
          /nsconfig/httpd*.conf /nsconfig/httpd.conf* \
@@ -646,7 +790,10 @@ for f in /nsconfig/ns.conf* /flash/nsconfig/ns.conf* /flash/nsconfig/rc.netscale
     [ -f "$f" ] && printf '%s\0' "$f" >> "$COPYLIST"
 done
 fx /var/cron -type f -print0 >> "$COPYLIST" 2>/dev/null
+fx /etc/cron.d -type f -print0 >> "$COPYLIST" 2>/dev/null
 run system/crontab_root.txt "crontab -l -u root"
+run system/crontab_nsroot.txt "crontab -l -u nsroot"
+run system/crontab_nobody.txt "crontab -l -u nobody"
 run system/keys_listing.txt "ls -laT /flash/nsconfig/keys /flash/nsconfig/keys/updated /nsconfig/ssl"
 run system/dir_listings.txt "ls -laT /var/core /var/nsinstall /var/ns_sys_backup /var/nslog"
 
@@ -659,9 +806,20 @@ else
     status skipped 'raw configuration, cron, account records and source files excluded by default'
 fi
 
+: > "$OUT/checks/boot_loader_conf.txt"
+if [ -f /flash/boot/loader.conf ] && [ ! -L /flash/boot/loader.conf ]; then
+    LOADER_HASH=$(hash1 /flash/boot/loader.conf) || { partial loader_conf_hash_failed; LOADER_HASH=unavailable; }
+    LOADER_BYTES=$(wc -c < /flash/boot/loader.conf 2>/dev/null || echo unavailable)
+    printf 'path=/flash/boot/loader.conf\nsha256=%s\nbytes=%s\n' "$LOADER_HASH" "$LOADER_BYTES" \
+        > "$OUT/checks/boot_loader_conf.txt" || fatal output_write
+else
+    echo 'present=0' > "$OUT/checks/boot_loader_conf.txt" || fatal output_write
+fi
+
 : > "$OUT/checks/ssh_keys_and_histories.txt"
 for d in / /var /flash /tmp; do
-    fx "$d" -type f \( -name 'authorized_keys*' -o -name '.*history' -o -name '.*_history' \) -print 2>/dev/null
+    fx "$d" -type f \( -name 'authorized_keys*' -o -name '.*history' -o -name '.*_history' \
+        -o -name 'history.txt.*' \) -print 2>/dev/null
 done | sort -u > "$OUT/checks/ssh_keys_and_histories.txt"
 add_copy_lines "$OUT/checks/ssh_keys_and_histories.txt"
 checked_grep 'authorized_keys' "$OUT/checks/ssh_keys_and_histories.txt" > "$OUT/.authorized_paths"
@@ -861,6 +1019,22 @@ if [ -f "$NSCONF" ]; then
         }' "$NSCONF" > "$OUT/checks/cve_precondition_summary.txt"
 fi
 
+UNIFIED=/flash/nsconfig/unified.conf
+[ -f /nsconfig/unified.conf ] && UNIFIED=/nsconfig/unified.conf
+if [ -f "$UNIFIED" ]; then
+    if [ "$SENSITIVE" -eq 1 ]; then
+        checked_grep -H -E '^(add|set|bind) system (user|group)' "$UNIFIED" \
+            > "$OUT/checks/unified_conf_system_accounts.txt"
+    else
+        awk '/^(add|set|bind) system (user|group)/ {n++} END {print "account_entries=" n+0}' "$UNIFIED" \
+            > "$OUT/checks/unified_conf_system_accounts.txt"
+    fi
+    UUSERS=$(awk '$1 == "add" && $2 == "system" && $3 == "user" && $4 != "nsroot" {n++} END {print n+0}' "$UNIFIED")
+    [ "$UUSERS" -eq 0 ] || flag INFO "Unified configuration contains $UUSERS local system-user entrie(s) besides nsroot"
+else
+    echo 'present=0' > "$OUT/checks/unified_conf_system_accounts.txt"
+fi
+
 # --------------------------------------------- 5. web dirs / webshells --
 stage 5 "web directories and webshell heuristics"
 WEBDIRS="/netscaler/ns_gui /var/netscaler /var/vpn"
@@ -956,6 +1130,42 @@ vpnlog_cat() {
 httperror_cat() {
     for f in /var/log/httperror.log*; do [ -f "$f" ] && catlog "$f"; done
 }
+
+# NetScaler MAC_Veriexec reports unsigned or changed executables in messages.
+# Extract a path only when the complete "file=... fsid=" structure is present;
+# aggressively concatenated log records are intentionally not parsed.
+: > "$OUT/.veriexec_raw"
+: > "$OUT/.veriexec_paths"
+messages_cat | awk -v paths="$OUT/.veriexec_paths" -v self="$SELF" '
+    /MAC\/veriexec: (no fingerprint|fingerprint does not match loaded value) \(file=/ {
+        if (index($0, ")MAC/veriexec:") > 0) next
+        start=index($0, "(file=")
+        rest=substr($0, start + 6)
+        stop=index(rest, " fsid=")
+        if (!start || !stop) next
+        path=substr(rest, 1, stop - 1)
+        helper=(length(path) >= 13 && substr(path, length(path) - 12) == "/.stat-helper" && index(path, "/nsir_") > 0)
+        if (path == self || helper) next
+        print path >> paths
+        print
+    }' > "$OUT/.veriexec_raw"
+sort -u "$OUT/.veriexec_paths" > "$OUT/logs_analysis/veriexec_failed_paths.txt" || fatal output_write
+VERIEXEC_HITS=$(wc -l < "$OUT/.veriexec_raw" | tr -d ' ')
+printf 'matching_lines=%s\n' "${VERIEXEC_HITS:-0}" > "$OUT/logs_analysis/veriexec_failures.txt" || fatal output_write
+if [ "$SENSITIVE" -eq 1 ]; then
+    mv "$OUT/.veriexec_raw" "$OUT/logs_analysis/veriexec_failures_raw.txt" || fatal output_write
+else
+    rm -f "$OUT/.veriexec_raw"
+fi
+rm -f "$OUT/.veriexec_paths"
+[ "${VERIEXEC_HITS:-0}" -eq 0 ] || flag HIGH "$VERIEXEC_HITS MAC_Veriexec integrity-failure line(s) found - logs_analysis/veriexec_failed_paths.txt"
+
+# Preserve no more than 25 implicated files, and only under explicit sensitive
+# collection. The list combines vendor sigchk and log-derived paths.
+cat "$OUT/checks/sigchk_unverified_paths.txt" "$OUT/logs_analysis/veriexec_failed_paths.txt" 2>/dev/null | \
+    awk '/^\// && $0 !~ /[|[:cntrl:]]/ {print}' | sort -u | head -n 25 \
+    > "$OUT/.native_integrity_copy_paths"
+add_copy_lines "$OUT/.native_integrity_copy_paths"
 
 if [ ! -s /var/log/ns.log ]; then
     flag MEDIUM "/var/log/ns.log missing or empty - possible log wiping; rely on off-box syslog"
@@ -1262,7 +1472,8 @@ else
     status skipped 'vendor support bundle not requested'
 fi
 stage packaging 'final archive'
-rm -f "$OUT/.stat-helper" "$COPYLIST" "$OUT/.webfiles0" "$OUT/.web_only0" "$OUT/.imgpaths" "$OUT/.recent_web"
+rm -f "$OUT/.stat-helper" "$COPYLIST" "$OUT/.webfiles0" "$OUT/.web_only0" "$OUT/.imgpaths" "$OUT/.recent_web" \
+    "$OUT/.native_manifest_paths" "$OUT/.portal_manifest_paths" "$OUT/.native_integrity_copy_paths"
 [ -s "$FLAGS" ] || printf '%s\n' '[INFO] No heuristic hits; this is not proof of a clean device.' > "$FLAGS"
 RESULT=0
 if [ -s "$ERRORS" ]; then RESULT=2; fi
