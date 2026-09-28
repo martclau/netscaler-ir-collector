@@ -1,4 +1,75 @@
-# Collector v1.2 validation
+# Collector validation
+
+## Collector v1.3 validation
+
+Assessed 2026-09-28. The incident-response additions pass the isolated synthetic regression suite and native metadata plus scoped-sensitive acceptance on NetScaler 14.1 build 73.37. Broad 120-day sensitive collection exposed a performance limit described below. This remains experimental, not production-certified.
+
+### Current artifact and tests
+
+- [Collector](ns_ir_collect.sh) v1.3 SHA-256: `0c3f7cb6baa94a706c9743e957aea185cb779f94e407f32f58dc0bbfa4fbbb74`.
+- [Regression suite](tests/test_collector.py): 32 test methods passed, comprising 36 fixture executions including failure subcases. [Results](tests/results.json) identify the tested script hash.
+- `dash -n`, `bash -n`, and `git diff --check` passed. ShellCheck was not installed in this validation environment, so no v1.3 ShellCheck result is claimed.
+
+New positive and negative fixtures exercise:
+
+- `/etc`, `/nsconfig`, and `/flash/nsconfig` HTTP configuration inventory/copy coverage; active `php_flag engine on`; alternate PHP extensions; non-PHP `Files`/`FilesMatch` PHP handlers; static-looking aliases; and live/persistent differences.
+- Process-chain counts for `ns_monuploadd_err.pl -WR`, decoder/IFS/staging markers, and descendant shells, while retaining raw matching arguments only with `-S`.
+- Rotated `messages`, `nsvpn`, HTTP access/VPN/error and existing log families; packet-engine parser/crash sequences; command-stage markers; CSS receiver requests; Base64-like User-Agents; and HTTP daemon reloads.
+- Runtime IPv4/IPv6 IOC-file validation and active-connection/log correlation. Mixed valid/invalid input fails closed. Default dedicated IOC results and flags contain counts rather than values; `-S` contains raw matching source lines. The supplied IOC file is excluded from the evidence tar.
+- Aggregate Enhanced ISN, virtual-server, DTLS, Oracle, FTP, DNS64, LSN and NAT64 precondition output.
+- The earlier clean-fixture behavior still passes, including the existing MEDIUM-only treatment of alternate PHP extensions and the default secret-exclusion regression.
+
+The Linux test runner uses Bubblewrap with FreeBSD and NetScaler CLI shims. Native testing below adds evidence for one VPX build, not every appliance build or representative production workload.
+
+### Native NetScaler 14.1-73.37 result
+
+Target: `NetScaler-VPX-14.1-73.37-fresh`, UUID `e487f2ff-64ed-4e26-83d5-f4cfe966909e`, 4,096 MB RAM, 2 vCPUs, one host-only adapter on `vboxnet0`, management IP `192.168.56.10`. SSH reported **NetScaler NS14.1 build 73.37.nc**, dated September 25, 2026. No traffic feature, authentication policy, or appliance configuration was changed. The VM was powered off after cleanup.
+
+The guest clock reported September 24 while the host assessment date was September 28. Guest-derived timestamps below therefore do not establish wall-clock UTC.
+
+Metadata invocation:
+
+```sh
+sh /var/tmp/ns_ir_collect.sh -C V13-NATIVE-META \
+  -i /var/tmp/nsir-test-iocs.txt -k -t 300 -m 512
+```
+
+| Check | Observed |
+| --- | --- |
+| Exact script hash | `0c3f7cb6baa94a706c9743e957aea185cb779f94e407f32f58dc0bbfa4fbbb74` on host and guest |
+| Duration / result | 41 seconds; exit 2 only because `kldstat` was absent (127) |
+| Outer archive | 3,445,159 bytes; SHA-256 `355f943ff032517c3b1fe9cc96de59a973f70cfbe8651c74905e1a04bc879492`; independent readback matched |
+| Staging | 24,404 KiB; raw evidence tar absent as required |
+| IOC input | One synthetic documentation-range IPv4 address; zero connection/log matches; source and normalized hashes recorded |
+| HTTP configuration | One configuration inventoried; one alternate PHP-extension MEDIUM baseline; zero engine-on, non-PHP `Files` handler, suspicious alias, or live/persistent-difference hits |
+| Processes and HTTP stages | Zero `-WR`, decoder/staging, descendant-shell, CSS receiver, Base64 User-Agent, or command-stage matches |
+| Preconditions | Enhanced ISN disabled; all collected gateway/authentication, HTTP/SSL/HTTP_QUIC, DTLS, Oracle, FTP, DNS64, LSN, and NAT64 counts were zero |
+| Baseline log signals | Three packet-engine parser/crash-chain lines (LOW) and seven HTTP reload lines (INFO); both require correlation |
+
+Scoped sensitive invocation:
+
+```sh
+sh /var/tmp/ns_ir_collect.sh -S -d 0 -C V13-NATIVE-SENSITIVE-D0 \
+  -i /var/tmp/nsir-test-iocs.txt -k -t 300 -m 1024
+```
+
+This completed in 55 seconds with exit 2. The verified outer archive was 212,096,262 bytes with SHA-256 `fe3fa0d9ff4fb0351c3ad93bba7f017a93dcd63039e0c595b3c9917b6da3a4d7`; staging was 455,414 KiB. It contained 252 evidence members, including the active HTTP configuration, and excluded the supplied IOC file. One live source changed during capture, so the pre-capture and captured-payload manifests differed and `evidence_changed_during_capture` was correctly recorded. Other partials were missing/feature-dependent CLI commands, unavailable root crontab, and files over the 20 MiB per-file evidence cap.
+
+The new read-only CLI calls behaved as follows on this unlicensed clean appliance: `show ns tcpparam`, `show service`, `show serviceGroup`, and the DNS64 action/policy queries returned 0; CR and LSN queries returned 1 and were truthfully marked partial. Raw configuration, logs, evidence tar, and CLI output were not exported from the guest.
+
+### Native defects found and corrected
+
+Two initial native runs terminated in the appliance shell with signal 11. The first isolated a new `for ... | sort` HTTP-path pipeline; the second isolated grouped log-reader pipelines. v1.3 now uses temporary-file enumeration and named reader functions instead. Native awk also rejected an unescaped slash in a character class; that expression was corrected. All three changes pass the full synthetic suite and the final native runs above.
+
+The initial staging-marker regex also matched legitimate `http*` log paths. It now requires a boundary after `/var/log/htt`; the final clean native run produced zero process staging-marker matches. Because the clean appliance itself contained packet-engine heartbeat/death and HTTP reload entries, standalone severity was calibrated to LOW and INFO respectively. Stronger command, HTTP-stage, process, and IOC matches remain independently HIGH.
+
+### Remaining v1.3 limits
+
+A default 120-day `-S` run reached its 600-second deadline during stage 9 and preserved staging as designed. The fresh image presented roughly 20,000 recent `/var/netscaler` and `/var/python` candidates; per-file source hashing did not finish within the deadline. `-S -d 0` validates sensitive capture and packaging but is not a substitute for optimizing or load-testing the broad default scope.
+
+Textual IPv6 IOC matching does not canonicalize equivalent spellings. Configuration counts do not establish external reachability, and HIGH heuristic hits remain investigation leads rather than compromise verdicts. Native support-bundle integration was not repeated for v1.3. After sanitized results were recorded, all six run directories, published archives, partial packaging data, console logs, transferred scripts/helpers, and the synthetic IOC file were removed by exact path. No raw appliance collection was retained or exported.
+
+## Collector v1.2 validation
 
 Assessed 2026-09-27. The opt-in vendor support-bundle integration passed synthetic regressions and an end-to-end run on the isolated NetScaler 14.1 build 73.30 appliance. This remains experimental; production load and other deployment types are not validated.
 

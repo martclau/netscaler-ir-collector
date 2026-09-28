@@ -1,8 +1,8 @@
 # NetScaler IR triage collector
 
-`ns_ir_collect.sh` v1.2 collects metadata and heuristic findings from a NetScaler root shell. It is an **experimental live-response aid**, not a disk imager, vulnerability scanner, or proof that an appliance is clean.
+`ns_ir_collect.sh` v1.3 collects metadata and heuristic findings from a NetScaler root shell. It is an **experimental live-response aid**, not a disk imager, vulnerability scanner, or proof that an appliance is clean.
 
-Version 1.1 fixes the archive-loss and misleading-success defects found in v1.0. See [validation results](VALIDATION.md). Metadata-mode collection has completed on the local NetScaler 14.1 build 73.30 lab with a documented missing-utility partial status. Production-load acceptance and full sensitive-mode appliance collection remain unverified.
+Version 1.3 adds HTTP persistence, expanded log/process-chain analysis, runtime IOC correlation, and aggregate exposure/precondition collection. See [validation results](VALIDATION.md). Metadata mode and a bounded `-S -d 0` workflow completed on the isolated NetScaler 14.1 build 73.37 appliance. A default 120-day `-S` run timed out while hashing roughly 20,000 recent-file candidates, so broad sensitive-mode performance and production-load acceptance remain unverified.
 
 ## Usage and data handling
 
@@ -12,6 +12,9 @@ sh /var/tmp/ns_ir_collect.sh -C INC-2026-0412
 
 # Explicitly authorize raw sensitive forensic collection:
 sh /var/tmp/ns_ir_collect.sh -S -C INC-2026-0412
+
+# Correlate runtime IPv4/IPv6 indicators without embedding them in the script:
+sh /var/tmp/ns_ir_collect.sh -i /var/tmp/case-iocs.txt -C INC-2026-0412
 ```
 
 **With neither `-S` nor `--support-bundle`, default mode does not copy source files, full configuration, raw log lines, histories, process arguments, account records, or session IDs.** It collects process names, network metadata, a filesystem timeline, path/hash inventories, version output, and aggregate heuristic results. It reads configuration and logs to produce those results. Paths, hostnames, addresses, case IDs, and executable names remain potentially sensitive metadata; attacker-controlled names are not an arbitrary-secret redaction boundary.
@@ -25,6 +28,7 @@ The script does not enable traffic features, alter authentication policy, create
 | `-o DIR` | Existing output parent | `/var/tmp` |
 | `-C ID` | Case ID: letters, digits, dot, underscore, hyphen | `unspecified` |
 | `-d DAYS` | Recent-file ctime lookback, 0–36500 | `120` |
+| `-i IOC_FILE` | Runtime IPv4/IPv6 list, one address per line; blank lines and `#` comments allowed | Off |
 | `--support-bundle` | Include a sensitive vendor support archive; independent of `-S` | Off |
 | `--support-timeout=SECONDS` | Vendor generation deadline, 1–86400; whole-run deadline still applies | `600` |
 | `-S` | Permit raw sensitive forensic collection | Off |
@@ -38,6 +42,8 @@ The script does not enable traffic features, alter authentication policy, create
 | `-h` | Help | |
 
 `-m` and `-r` are sampled once per second and checked again before staging cleanup. They are **not filesystem quotas**: a fast writer can temporarily overshoot them. The monitored footprint includes staging, the outer archive and packaging sidecars; full mode temporarily holds both inner and outer archives and a per-file verification buffer. Budget for these duplicate bytes. SIGKILL, power loss, uninterruptible kernel I/O and exhausted storage can defeat normal cleanup/status reporting.
+
+The IOC file is resolved and validated before correlation. Its source and normalized SHA-256 values plus normalized address count are recorded, and source changes are detected, but its values are not embedded in the collector or repeated in default IOC-result files/flags. Existing volatile network outputs and the filesystem timeline can still contain the same addresses or IOC-file path because addresses and paths are part of the collector's documented metadata scope. With `-S`, matching source lines are retained. The supplied IOC file itself is excluded from the raw evidence tar. IPv6 matching is textual after lowercasing; provide alternate textual forms when the source logs may use a different valid compression.
 
 ## Vendor support bundle
 
@@ -60,13 +66,13 @@ Vendor workspaces and archives remain in their original locations, including aft
 
 Use a NetScaler root shell with native FreeBSD `stat -f` or an installed Python 3 at a supported appliance location, `tar` supporting `--null -T` and `-xO`, a compatible `timeout` with `-k`, `realpath`, `mktemp`, and a SHA-256 utility (`sha256`, `sha256sum`, or OpenSSL). Build 73.30 lacks `stat`; the collector uses its installed Python 3 `os.lstat` adapter and records that backend in metadata. Missing mandatory utilities fail before substantive collection. Each wrapped command has a 60-second timeout in addition to the whole-run deadline. Missing optional commands produce partial status.
 
-1. Volatile system metadata; raw process arguments only with `-S`.
-2. NetScaler version; extended read-only CLI queries only with `-S`.
+1. Volatile system metadata, targeted process-chain counts and optional IOC correlation; broad raw process arguments only with `-S`.
+2. NetScaler version and an aggregate Enhanced ISN query; extended read-only CLI queries only with `-S`.
 3. Filesystem timeline and post-boot change review.
-4. Persistence, accounts, SUID/SGID and configuration heuristics.
+4. Persistence, accounts, SUID/SGID, live/persistent HTTP configuration comparison, and aggregate exposure/precondition counts.
 5. Webshell patterns, staged keys/configuration, image magic and temporary executables.
 6. Log/core inventory; raw copies only with `-S`.
-7. Log heuristics. Default output omits raw lines, usernames and session IDs.
+7. Rotated `ns.log`, `messages`, `nsvpn`, HTTP access/VPN/error and shell-log heuristics. Default heuristic output omits raw lines, usernames and session IDs.
 8. Live-source hash inventories; these are not an atomic filesystem snapshot.
 9. Optional raw evidence tar and captured-content hashes.
 10. Optional vendor support bundle, followed by verified outer packaging and checksum.
@@ -119,6 +125,10 @@ Shipped PNG/GIF/JPEG/ICO signatures are recognized regardless of filename extens
 
 The AAA heuristic checks bytes 128–255 in rejection-message lines; ASCII controls/DEL alone are not matched. It is an attempt indicator, not evidence of successful memory disclosure or session theft. Endpoint hits and filesystem patterns do not determine which CVE, if any, was exploited.
 
+HTTP checks cover `/etc/httpd*.conf`, `/nsconfig/httpd*.conf`, and `/flash/nsconfig/httpd*.conf`. Alternate PHP extensions remain MEDIUM because clean same-build configurations can contain them. Explicit `php_flag engine on` and non-PHP `Files`/`FilesMatch` scopes using a PHP handler are HIGH investigation leads. Alias mismatches and live/persistent differences require baseline and change-record review.
+
+The exposure summary counts configured gateway/authentication virtual servers; HTTP, SSL and HTTP_QUIC LB/CS/CR virtual servers; DTLS enablement; Oracle/FTP entries; and DNS64/LSN/NAT64 entries. These counts and the Enhanced ISN result identify configuration prerequisites only—they do not establish reachability, affected-version status, exploitation or compromise.
+
 ## Development and validation
 
 ```sh
@@ -129,7 +139,7 @@ shellcheck -s sh ns_ir_collect.sh
 NSIR_TEST_RESULTS=tests/results.json python3 tests/test_collector.py
 ```
 
-The test runner executes the real script in a private synthetic filesystem and network namespace. FreeBSD and appliance commands are shimmed; these tests do not establish native compatibility. It exercises privacy defaults, opt-in raw collection, selected indicators, command failures, packaging/corruption/hash failures, unusual names, live-file changes, IPv6 handling, limits, interruption and concurrent runs. No fixture webshell or SUID marker is executed.
+The test runner executes the real script in a private synthetic filesystem and network namespace. FreeBSD and appliance commands are shimmed; these tests do not establish native compatibility. It exercises privacy defaults, opt-in raw collection, HTTP configuration variants, process/log chain markers, runtime IOC handling, aggregate exposure output, selected indicators, command failures, packaging/corruption/hash failures, unusual names, live-file changes, IPv6 handling, limits, interruption and concurrent runs. No fixture webshell or SUID marker is executed.
 
 Before production use, validate the exact artifact on each target build, check clean-baseline findings, test all optional flags, and measure CPU, memory, disk use and duration under realistic load. Preserve disks and off-box logs as your incident-response procedure requires.
 
@@ -141,5 +151,7 @@ Before production use, validate the exact artifact on each target build, check c
 
 ## Changelog
 
+- **1.3 (2026-09-28):** live and persistent HTTP configuration analysis, expanded rotated-log and process-chain detections, runtime IOC correlation, Enhanced ISN collection, and aggregate vulnerable-feature precondition counts.
+- **1.2 (2026-09-27):** opt-in vendor support-bundle collection with bounded execution, provenance, integrity checks, and failure classification.
 - **1.1 (2026-09-27):** metadata default, explicit sensitive mode, failure-safe packaging, captured-payload verification, aggregate statuses, bounded supervision, address parsing corrections and executable regression tests.
 - **1.0 (2026-09-27):** initial release; validation found evidence-loss and secret-exclusion defects. Do not rely on its completion banner or private-key exclusion claim.

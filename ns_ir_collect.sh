@@ -1,6 +1,6 @@
 #!/bin/sh
-# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.2
-# Usage: sh ns_ir_collect.sh [-o DIR] [-C CASE] [-d DAYS] [-k] [-S] [-cnb]
+# ns_ir_collect.sh - experimental NetScaler IR triage collector v1.3
+# Usage: sh ns_ir_collect.sh [-o DIR] [-C CASE] [-d DAYS] [-i IOC_FILE] [-k] [-S] [-cnb]
 #        [-t SECONDS] [-m MAX_MB] [-r RESERVE_MB]
 #        [--support-bundle] [--support-timeout=SECONDS]
 # --support-bundle permits a sensitive vendor archive independently of -S.
@@ -9,6 +9,7 @@
 # Default: metadata and aggregate findings; no raw source files or log lines.
 # -S explicitly permits sensitive forensic data, INCLUDING private keys,
 # configuration, histories, process arguments and session material.
+# -i accepts one IPv4/IPv6 indicator per line; values are not embedded in source.
 # -c cores / -n performance logs require -S. -b hashes binary directories.
 # -k keeps staging even after verified packaging. -h prints this help.
 # Limits: 900 seconds, 512 MiB total output, 64 MiB free-space reserve.
@@ -27,7 +28,7 @@ umask 077
 # Do not leave collector/child core dumps containing in-memory source data.
 # shellcheck disable=SC3045 # FreeBSD sh and supported test shells provide -c.
 ulimit -c 0
-VERSION=1.2
+VERSION=1.3
 OUTPARENT=/var/tmp
 CASEID=unspecified
 DAYS=120
@@ -41,8 +42,9 @@ SUPPORT_SECONDS=600
 MAX_SECONDS=900
 MAX_MB=512
 RESERVE_MB=64
+IOC_FILE=''
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
-while getopts 'o:C:d:t:m:r:Scnbkh-:' opt; do
+while getopts 'o:C:d:t:m:r:i:Scnbkh-:' opt; do
     case "$opt" in
         -) case "$OPTARG" in
             support-bundle) SUPPORT_BUNDLE=1;;
@@ -51,6 +53,7 @@ while getopts 'o:C:d:t:m:r:Scnbkh-:' opt; do
            esac;;
         o) OUTPARENT=$OPTARG;; C) CASEID=$OPTARG;; d) DAYS=$OPTARG;;
         t) MAX_SECONDS=$OPTARG;; m) MAX_MB=$OPTARG;; r) RESERVE_MB=$OPTARG;;
+        i) IOC_FILE=$OPTARG;;
         S) SENSITIVE=1;; c) COPY_CORES=1;; n) COPY_NSLOG=1;;
         b) HASH_BINS=1;; k) KEEP_STAGING=1;; h) usage 0;; *) usage 1;;
     esac
@@ -82,9 +85,14 @@ if [ "$SENSITIVE" -eq 0 ] && { [ "$COPY_CORES" -eq 1 ] || [ "$COPY_NSLOG" -eq 1 
 fi
 [ "$(id -u)" -eq 0 ] || { echo "ERROR: run as root from the NetScaler shell." >&2; exit 1; }
 case "$CASEID" in *[!a-zA-Z0-9._-]*|'') echo 'ERROR: case ID must use letters, digits, dot, underscore or hyphen' >&2; exit 1;; esac
+if [ -n "$IOC_FILE" ]; then
+    [ -f "$IOC_FILE" ] || { echo 'ERROR: IOC file must be a readable regular file' >&2; exit 1; }
+    IOC_FILE=$(realpath "$IOC_FILE") || { echo 'ERROR: cannot resolve IOC file' >&2; exit 1; }
+    case "$IOC_FILE" in *[!\ -~]*|*'|'*) echo 'ERROR: unsupported IOC file path' >&2; exit 1;; esac
+fi
 case "$0" in /*) SELF=$0;; *) SELF=$(pwd)/$0;; esac
 SELFBASE=$(basename "$SELF")
-for tool in chmod realpath timeout mktemp tar awk find xargs sort grep sed tr wc df du sleep date cp mv rm cmp expr; do
+for tool in chmod realpath timeout mktemp tar awk find xargs sort grep sed tr wc df du sleep date cp mv rm cmp expr gzip; do
     command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: required utility missing: $tool" >&2; exit 1; }
 done
 timeout -k 1 1 sh -c ':' >/dev/null 2>&1 || { echo 'ERROR: compatible timeout utility required' >&2; exit 1; }
@@ -271,6 +279,61 @@ catlog() {
 content_sink() {
     if [ "$SENSITIVE" -eq 1 ]; then cat; else awk 'END {print "matching_lines=" NR}'; fi
 }
+ioc_filter() {
+    [ -n "$IOC_FILE" ] || return 0
+    awk -v list="$OUT/.iocs_normalized" '
+        BEGIN { while ((getline v < list) > 0) wanted[v] = 1; close(list) }
+        {
+            line = tolower($0)
+            for (v in wanted) {
+                boundary = index(v, ":") ? "[0-9a-f:.]" : "[0-9.]"
+                start = 1
+                while ((at = index(substr(line, start), v)) > 0) {
+                    at += start - 1
+                    before = at > 1 ? substr(line, at - 1, 1) : ""
+                    after = substr(line, at + length(v), 1)
+                    if (before !~ boundary && after !~ boundary) { print; next }
+                    start = at + length(v)
+                }
+            }
+        }'
+}
+
+if [ -n "$IOC_FILE" ]; then
+    IOC_SOURCE_HASH=$(hash1 "$IOC_FILE") || fatal ioc_hash_failed
+    awk '
+        function ipv6(s, sides,n,l,r,a,b,i) {
+            n = split(s, sides, "::"); if (n > 2) return 0
+            l = sides[1] == "" ? 0 : split(sides[1], a, ":")
+            r = n == 2 && sides[2] != "" ? split(sides[2], b, ":") : 0
+            if ((n == 1 && l != 8) || (n == 2 && l + r >= 8)) return 0
+            for (i = 1; i <= l; i++) if (a[i] == "" || length(a[i]) > 4 || a[i] !~ /^[0-9a-f]+$/) return 0
+            for (i = 1; i <= r; i++) if (b[i] == "" || length(b[i]) > 4 || b[i] !~ /^[0-9a-f]+$/) return 0
+            return 1
+        }
+        {
+            bad = 0
+            sub(/\r$/, ""); sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "")
+            if ($0 == "" || $0 ~ /^#/) next
+            v = tolower($0)
+            if (v ~ /^[0-9.]+$/) {
+                n = split(v, a, ".")
+                if (n != 4) bad = 1
+                for (i = 1; i <= n; i++)
+                    if (a[i] !~ /^[0-9]+$/ || length(a[i]) > 3 || a[i] + 0 > 255) bad = 1
+            } else if (v ~ /^[0-9a-f:]+$/ && v ~ /:/) {
+                if (!ipv6(v)) bad = 1
+            } else bad = 1
+            if (!bad) print v
+            else { print "invalid IOC at line " NR > "/dev/stderr"; exit 2 }
+        }' "$IOC_FILE" > "$OUT/.iocs_unsorted" || fatal invalid_ioc_file
+    sort -u "$OUT/.iocs_unsorted" > "$OUT/.iocs_normalized" || fatal ioc_sort_failed
+    rm -f "$OUT/.iocs_unsorted"
+    [ -s "$OUT/.iocs_normalized" ] || fatal empty_ioc_file
+    IOC_HASH_AFTER=$(hash1 "$IOC_FILE") || fatal ioc_hash_failed
+    [ "$IOC_SOURCE_HASH" = "$IOC_HASH_AFTER" ] || fatal ioc_file_changed_during_load
+    IOC_NORMALIZED_HASH=$(hash1 "$OUT/.iocs_normalized") || fatal ioc_hash_failed
+fi
 log "NetScaler IR collector v$VERSION -> $OUT (sensitive=$SENSITIVE)"
 {
     echo "collector_version=$VERSION"
@@ -283,6 +346,13 @@ log "NetScaler IR collector v$VERSION -> $OUT (sensitive=$SENSITIVE)"
     echo "support_bundle=$SUPPORT_BUNDLE support_timeout_seconds=$SUPPORT_SECONDS"
     echo "limits_seconds=$MAX_SECONDS output_MiB=$MAX_MB reserve_MiB=$RESERVE_MB"
     echo "options=cores:$COPY_CORES nslog:$COPY_NSLOG hashbins:$HASH_BINS"
+    if [ -n "$IOC_FILE" ]; then
+        echo "ioc_file_sha256=$IOC_SOURCE_HASH"
+        echo "ioc_normalized_sha256=$IOC_NORMALIZED_HASH"
+        echo "ioc_count=$(wc -l < "$OUT/.iocs_normalized" | tr -d ' ')"
+    else
+        echo "ioc_count=0"
+    fi
 } > "$OUT/00_metadata.txt" || fatal metadata_write
 hash1 "$SELF" >/dev/null || fatal script_hash_failed
 # Some ADC builds omit stat. Use an isolated Python 3 lstat adapter when available.
@@ -388,6 +458,56 @@ checked_grep -E '[[:space:]](/var/tmp|/tmp|/var/vpn|/var/netscaler|/netscaler/ns
 [ -s "$OUT/checks/procs_from_writable_paths.txt" ] && \
     flag MEDIUM "Process executing from a writable/web path; compare same-build baseline - checks/procs_from_writable_paths.txt"
 
+# Inspect arguments for a narrow set of high-signal execution-chain markers.
+# Default output is a count only; -S retains matching process records.
+ps -axwwo pid,ppid,user,command 2>/dev/null | awk '
+    NR > 1 {
+        line = $0; low = tolower(line)
+        if (low ~ /ns_monuploadd_err\.pl/ && low ~ /(^|[[:space:]])-wr([[:space:]]|$)/) print line
+    }' | content_sink > "$OUT/checks/procs_monuploadd_wr.txt"
+if [ "$SENSITIVE" -eq 1 ]; then PROC_WR=$(wc -l < "$OUT/checks/procs_monuploadd_wr.txt")
+else PROC_WR=$(sed 's/^matching_lines=//' "$OUT/checks/procs_monuploadd_wr.txt"); fi
+[ "${PROC_WR:-0}" -eq 0 ] || flag HIGH "$PROC_WR ns_monuploadd_err.pl -WR process(es) observed - checks/procs_monuploadd_wr.txt"
+
+ps -axwwo pid,ppid,user,command 2>/dev/null | awk '
+    NR > 1 {
+        line = $0; low = tolower(line)
+        if (low ~ /b64decode|\$\{ifs\}|\/var\/log\/htt([/[:space:]]|$)/) print line
+    }' | content_sink > "$OUT/checks/procs_decoder_or_staging_markers.txt"
+if [ "$SENSITIVE" -eq 1 ]; then PROC_STAGE=$(wc -l < "$OUT/checks/procs_decoder_or_staging_markers.txt")
+else PROC_STAGE=$(sed 's/^matching_lines=//' "$OUT/checks/procs_decoder_or_staging_markers.txt"); fi
+[ "${PROC_STAGE:-0}" -eq 0 ] || flag HIGH "$PROC_STAGE process(es) contain decoder/IFS/staging markers - checks/procs_decoder_or_staging_markers.txt"
+
+ps -axwwo pid,ppid,user,command 2>/dev/null | awk '
+    NR > 1 {
+        pid = $1; parent[pid] = $2; user[pid] = $3
+        cmd = ""; for (i = 4; i <= NF; i++) cmd = cmd (i == 4 ? "" : " ") $i
+        command[pid] = cmd; low = tolower(cmd)
+        if (low ~ /ns_monuploadd_err\.pl/ && low ~ /(^|[[:space:]])-wr([[:space:]]|$)/) runner[pid] = 1
+    }
+    END {
+        for (pid in command) {
+            first = command[pid]; sub(/[[:space:]].*$/, "", first); sub(/^.*\//, "", first); sub(/^-/, "", first)
+            if (tolower(first) !~ /^(sh|bash|csh|tcsh|zsh)$/) continue
+            p = parent[pid]; depth = 0
+            while (p != "" && p != "0" && depth++ < 64) {
+                if (runner[p]) { print pid, parent[pid], user[pid], command[pid]; break }
+                p = parent[p]
+            }
+        }
+    }' | content_sink > "$OUT/checks/procs_wr_descendant_shells.txt"
+if [ "$SENSITIVE" -eq 1 ]; then PROC_CHILD=$(wc -l < "$OUT/checks/procs_wr_descendant_shells.txt")
+else PROC_CHILD=$(sed 's/^matching_lines=//' "$OUT/checks/procs_wr_descendant_shells.txt"); fi
+[ "${PROC_CHILD:-0}" -eq 0 ] || flag HIGH "$PROC_CHILD shell process(es) descend from ns_monuploadd_err.pl -WR - checks/procs_wr_descendant_shells.txt"
+
+if [ -n "$IOC_FILE" ]; then
+    cat "$OUT/system/sockstat.txt" "$OUT/system/netstat_an.txt" 2>/dev/null | ioc_filter | content_sink \
+        > "$OUT/checks/ioc_active_connection_hits.txt"
+    if [ "$SENSITIVE" -eq 1 ]; then IOC_ACTIVE=$(wc -l < "$OUT/checks/ioc_active_connection_hits.txt")
+    else IOC_ACTIVE=$(sed 's/^matching_lines=//' "$OUT/checks/ioc_active_connection_hits.txt"); fi
+    [ "${IOC_ACTIVE:-0}" -eq 0 ] || flag HIGH "$IOC_ACTIVE active-connection line(s) matched the runtime IOC file - checks/ioc_active_connection_hits.txt"
+fi
+
 # ------------------------------------------------------ 2. NetScaler CLI --
 stage 2 "NetScaler CLI state"
 CLI_CMDS='ns_version|show ns version
@@ -401,6 +521,7 @@ running_config|show ns runningConfig
 diff_running_vs_saved|diff ns config
 ns_features|show ns feature
 ns_modes|show ns mode
+ns_tcpparam|show ns tcpparam
 system_users|show system user
 system_groups|show system group
 system_cmdpolicies|show system cmdPolicy
@@ -413,6 +534,14 @@ saml_idp_profiles|show authentication samlIdPProfile
 saml_actions|show authentication samlAction
 lb_vservers|show lb vserver
 cs_vservers|show cs vserver
+cr_vservers|show cr vserver
+services|show service
+service_groups|show serviceGroup
+dns64_actions|show dns action64
+dns64_policies|show dns policy64
+lsn_parameters|show lsn parameter
+lsn_groups|show lsn group
+lsn_nat64_stats|stat lsn nat64
 responder_policies|show responder policy
 rewrite_policies|show rewrite policy
 ssl_certkeys|show ssl certKey
@@ -432,6 +561,32 @@ if command -v nscli >/dev/null 2>&1; then
     checked_grep -qiE 'netscaler|build' "$OUT/netscaler_cli/ns_version.txt" || partial cli_version_unrecognized
 else
     partial nscli_unavailable
+fi
+
+# The Enhanced ISN setting is a vulnerability precondition in current CERT
+# guidance. Retain only an aggregate in default mode.
+if command -v nscli >/dev/null 2>&1; then
+    timeout -k 2 60 nscli -U '%%:.:.' 'show ns tcpparam' < /dev/null > "$OUT/.tcpparam_raw" 2>&1
+    TCP_RC=$?
+    if [ "$TCP_RC" -ne 0 ] || grep -qiE '^[[:space:]]*(ERROR:|ERROR |Invalid command|Permission denied|Access denied)' "$OUT/.tcpparam_raw"; then
+        partial tcpparam_query_failed
+    fi
+    awk '
+        BEGIN { found = 0; enabled = 0; disabled = 0 }
+        { low = tolower($0) }
+        low ~ /enhanced[[:space:]_-]*isn|enhancedisngeneration/ {
+            found++
+            if (low ~ /enabled|[[:space:]]on([[:space:]]|$)|[[:space:]]yes([[:space:]]|$)/) enabled++
+            if (low ~ /disabled|[[:space:]]off([[:space:]]|$)|[[:space:]]no([[:space:]]|$)/) disabled++
+        }
+        END {
+            print "enhanced_isn_setting_lines=" found
+            print "enhanced_isn_enabled_lines=" enabled
+            print "enhanced_isn_disabled_lines=" disabled
+        }' "$OUT/.tcpparam_raw" > "$OUT/checks/tcpparam_precondition.txt"
+    ENHANCED_ISN=$(sed -n 's/^enhanced_isn_enabled_lines=//p' "$OUT/checks/tcpparam_precondition.txt")
+    [ "${ENHANCED_ISN:-0}" -eq 0 ] || flag INFO "Enhanced ISN generation is enabled; review applicable CVE preconditions - checks/tcpparam_precondition.txt"
+    rm -f "$OUT/.tcpparam_raw"
 fi
 
 # ------------------------------------------------- 3. filesystem timeline --
@@ -484,7 +639,9 @@ stage 4 "configuration and persistence"
 if [ "$SENSITIVE" -eq 1 ]; then
 for f in /nsconfig/ns.conf* /flash/nsconfig/ns.conf* /flash/nsconfig/rc.netscaler* \
          /flash/nsconfig/rc.conf* /etc/rc.conf /etc/rc.local /etc/crontab /etc/passwd \
-         /etc/group /etc/auth.conf /etc/httpd*.conf /etc/httpd.conf* /etc/ssh/sshd_config \
+         /etc/group /etc/auth.conf /etc/httpd*.conf /etc/httpd.conf* \
+         /nsconfig/httpd*.conf /nsconfig/httpd.conf* \
+         /flash/nsconfig/httpd*.conf /flash/nsconfig/httpd.conf* /etc/ssh/sshd_config \
          /etc/syslog.conf /etc/newsyslog.conf /etc/hosts /etc/resolv.conf; do
     [ -f "$f" ] && printf '%s\0' "$f" >> "$COPYLIST"
 done
@@ -537,20 +694,98 @@ for s in /bin/sh /bin/bash /usr/local/bin/bash; do
 done
 [ -e /var/tmp/sh ] && flag HIGH "/var/tmp/sh exists (NCSC-NL CVE-2025-6543 IOC)"
 
+: > "$OUT/.httpd_paths"
+: > "$OUT/.httpd_paths_unsorted"
+for f in /etc/httpd*.conf /etc/httpd.conf* \
+         /nsconfig/httpd*.conf /nsconfig/httpd.conf* \
+         /flash/nsconfig/httpd*.conf /flash/nsconfig/httpd.conf*; do
+    [ -f "$f" ] && printf '%s\n' "$f" >> "$OUT/.httpd_paths_unsorted"
+done
+sort -u "$OUT/.httpd_paths_unsorted" > "$OUT/.httpd_paths" || fatal httpd_path_sort_failed
+rm -f "$OUT/.httpd_paths_unsorted"
+add_copy_lines "$OUT/.httpd_paths"
+
+: > "$OUT/checks/httpd_conf_inventory.txt"
 : > "$OUT/checks/httpd_conf_disabled_protections.txt"
 : > "$OUT/checks/httpd_conf_php_extensions.txt"
-for f in /etc/httpd*.conf /etc/httpd.conf*; do
+: > "$OUT/checks/httpd_conf_php_engine_on.txt"
+: > "$OUT/checks/httpd_conf_files_php_handler.txt"
+: > "$OUT/checks/httpd_conf_static_aliases.txt"
+while IFS= read -r f; do
     [ -f "$f" ] || continue
+    h=$(hash1 "$f") || { partial httpd_config_hash_failed; continue; }
+    printf '%s  %s\n' "$h" "$f" >> "$OUT/checks/httpd_conf_inventory.txt"
     checked_grep -lE '^[[:space:]]*#.*(Require[[:space:]]+all[[:space:]]+denied|php_flag[[:space:]]+engine[[:space:]]+off)' "$f" | \
         sed "s|^|$f:|" >> "$OUT/checks/httpd_conf_disabled_protections.txt"
-    awk -v f="$f" '/^[[:space:]]*(AddType|AddHandler)[[:space:]].*php/ {
-        for (i = 3; i <= NF; i++) if ($i ~ /^\./ && $i != ".php") print f ":" NR ": alternate PHP extension" }' "$f" \
+    awk -v f="$f" '
+        {
+            low = tolower($0)
+            if (low ~ /^[[:space:]]*#/ || low !~ /^[[:space:]]*(addtype|addhandler)[[:space:]]/ || low !~ /php/) next
+            for (i = 3; i <= NF; i++) {
+                ext = tolower($i)
+                if (ext ~ /^\./ && ext !~ /^\.(php|phtml|pht|xhtml)$/)
+                    print f ":" NR ": alternate PHP extension"
+            }
+        }' "$f" \
         >> "$OUT/checks/httpd_conf_php_extensions.txt"
+    awk -v f="$f" '
+        {
+            low = tolower($0)
+            if (low !~ /^[[:space:]]*#/ && low ~ /^[[:space:]]*php_flag[[:space:]]+engine[[:space:]]+on([[:space:]]|$)/)
+                print f ":" NR ": PHP engine enabled"
+        }' "$f" >> "$OUT/checks/httpd_conf_php_engine_on.txt"
+    awk -v f="$f" '
+        {
+            low = tolower($0)
+            if (low ~ /^[[:space:]]*<(files|filesmatch)[[:space:]]/) {
+                inside = 1; start = NR
+                selector = low
+                nonphp = selector !~ /\.(php|phtml|pht|xhtml)([^a-z]|$)/
+            }
+            if (inside && nonphp && low !~ /^[[:space:]]*#/ && low ~ /sethandler[[:space:]]+.*(x-httpd-php|php-script)/)
+                print f ":" start ": non-PHP Files block uses PHP handler"
+            if (low ~ /^[[:space:]]*<\/(files|filesmatch)>/) { inside = 0; nonphp = 0 }
+        }' "$f" >> "$OUT/checks/httpd_conf_files_php_handler.txt"
+    awk -v f="$f" '
+        {
+            low = tolower($0)
+            if (low ~ /^[[:space:]]*#/ || low !~ /^[[:space:]]*(alias|aliasmatch)[[:space:]]/) next
+            url = tolower($2); target = tolower($3)
+            if (url ~ /\.(css|js|png|gif|jpg|jpeg|ico)([[:space:]"'\''>]|$)/ &&
+                (target ~ /(^|\/)\.[^\/]+$/ || target !~ /\.(css|js|png|gif|jpg|jpeg|ico)([[:space:]"'\''>]|$)/))
+                print f ":" NR ": static-looking URL aliases to non-static/hidden target"
+        }' "$f" >> "$OUT/checks/httpd_conf_static_aliases.txt"
+done < "$OUT/.httpd_paths"
+
+: > "$OUT/checks/httpd_conf_live_persistent_differences.txt"
+for live in /etc/httpd*.conf /etc/httpd.conf*; do
+    [ -f "$live" ] || continue
+    base=$(basename "$live")
+    for persistent in "/nsconfig/$base" "/flash/nsconfig/$base"; do
+        [ -f "$persistent" ] || continue
+        cmp -s "$live" "$persistent"
+        cmp_rc=$?
+        if [ "$cmp_rc" -eq 1 ]; then
+            printf '%s|%s\n' "$live" "$persistent" >> "$OUT/checks/httpd_conf_live_persistent_differences.txt"
+        elif [ "$cmp_rc" -gt 1 ]; then partial httpd_config_compare_failed
+        fi
+    done
 done
+sort -u "$OUT/checks/httpd_conf_live_persistent_differences.txt" \
+    > "$OUT/.httpd_differences" && mv "$OUT/.httpd_differences" "$OUT/checks/httpd_conf_live_persistent_differences.txt"
 [ -s "$OUT/checks/httpd_conf_disabled_protections.txt" ] && \
     flag HIGH "httpd.conf has commented-out 'Require all denied' / 'php_flag engine off' - checks/httpd_conf_disabled_protections.txt"
 [ -s "$OUT/checks/httpd_conf_php_extensions.txt" ] && \
-    flag MEDIUM "httpd.conf maps PHP handler to non-.php extensions - checks/httpd_conf_php_extensions.txt"
+    flag MEDIUM "HTTP configuration maps PHP handler to alternate extensions; compare a clean same-build baseline - checks/httpd_conf_php_extensions.txt"
+[ -s "$OUT/checks/httpd_conf_php_engine_on.txt" ] && \
+    flag HIGH "HTTP configuration explicitly enables the PHP engine - checks/httpd_conf_php_engine_on.txt"
+[ -s "$OUT/checks/httpd_conf_files_php_handler.txt" ] && \
+    flag HIGH "Non-PHP Files/FilesMatch scope uses a PHP handler - checks/httpd_conf_files_php_handler.txt"
+[ -s "$OUT/checks/httpd_conf_static_aliases.txt" ] && \
+    flag MEDIUM "Static-looking HTTP aliases map to hidden/non-static targets - checks/httpd_conf_static_aliases.txt"
+[ -s "$OUT/checks/httpd_conf_live_persistent_differences.txt" ] && \
+    flag MEDIUM "Live and persistent HTTP configurations differ - checks/httpd_conf_live_persistent_differences.txt"
+rm -f "$OUT/.httpd_paths"
 
 [ -e /etc/auth.conf ] || \
     flag MEDIUM "/etc/auth.conf missing (deleted in CVE-2023-3519 intrusions) - verify against clean same-build appliance"
@@ -576,6 +811,54 @@ if [ -f "$NSCONF" ]; then
     USERS=$(awk '$1 == "add" && $2 == "system" && $3 == "user" && $4 != "nsroot" {n++} END {print n+0}' "$NSCONF")
     [ "$USERS" -eq 0 ] || flag INFO "Local system users besides nsroot: $USERS (review authorized access)"
     flag INFO "Saved ns.conf mtime epoch: $("$STAT" -f '%m' "$NSCONF" 2>/dev/null) - compare netscaler_cli/diff_running_vs_saved.txt"
+    awk '
+        BEGIN { vpn=auth=lb_http=lb_ssl=lb_http_quic=cs_http=cs_ssl=cr_http=cr_ssl=oracle=ftp=dtls=dns64=lsn=nat64=0 }
+        {
+            low = tolower($0)
+            if (low ~ /^add[[:space:]]+vpn[[:space:]]+vserver[[:space:]]/) vpn++
+            if (low ~ /^add[[:space:]]+authentication[[:space:]]+vserver[[:space:]]/) auth++
+            if (low ~ /^add[[:space:]]+lb[[:space:]]+vserver[[:space:]]/) {
+                type = toupper($5)
+                if (type == "HTTP") lb_http++
+                else if (type == "SSL") lb_ssl++
+                else if (type == "HTTP_QUIC") lb_http_quic++
+                else if (type == "ORACLE") oracle++
+                else if (type == "FTP") ftp++
+            }
+            if (low ~ /^add[[:space:]]+cs[[:space:]]+vserver[[:space:]]/) {
+                type = toupper($5)
+                if (type == "HTTP") cs_http++
+                else if (type == "SSL") cs_ssl++
+            }
+            if (low ~ /^add[[:space:]]+cr[[:space:]]+vserver[[:space:]]/) {
+                type = toupper($5)
+                if (type == "HTTP") cr_http++
+                else if (type == "SSL") cr_ssl++
+            }
+            if (low ~ /-dtls[[:space:]]+(on|enabled|yes)/) dtls++
+            if (low ~ /-dns64[[:space:]]+enabled/ || low ~ /^add[[:space:]]+dns[[:space:]]+(action64|policy64)/) dns64++
+            if (low ~ /^(add|set|bind)[[:space:]]+lsn[[:space:]]/) lsn++
+            if (low ~ /nat64/) nat64++
+            if (low ~ /^add[[:space:]]+(service|servicegroup)[[:space:]]/ && low ~ /[[:space:]]oracle([[:space:]]|$)/) oracle++
+            if (low ~ /^add[[:space:]]+(service|servicegroup)[[:space:]]/ && low ~ /[[:space:]]ftp([[:space:]]|$)/) ftp++
+        }
+        END {
+            print "vpn_vservers=" vpn
+            print "authentication_vservers=" auth
+            print "lb_http_vservers=" lb_http
+            print "lb_ssl_vservers=" lb_ssl
+            print "lb_http_quic_vservers=" lb_http_quic
+            print "cs_http_vservers=" cs_http
+            print "cs_ssl_vservers=" cs_ssl
+            print "cr_http_vservers=" cr_http
+            print "cr_ssl_vservers=" cr_ssl
+            print "dtls_enabled_entries=" dtls
+            print "oracle_entries=" oracle
+            print "ftp_entries=" ftp
+            print "dns64_entries=" dns64
+            print "lsn_entries=" lsn
+            print "nat64_entries=" nat64
+        }' "$NSCONF" > "$OUT/checks/cve_precondition_summary.txt"
 fi
 
 # --------------------------------------------- 5. web dirs / webshells --
@@ -664,11 +947,22 @@ stage 7 "log heuristics"
 nslog_cat() {
     for f in /var/log/ns.log*; do [ -f "$f" ] && catlog "$f"; done
 }
+messages_cat() {
+    for f in /var/log/messages*; do [ -f "$f" ] && catlog "$f"; done
+}
+vpnlog_cat() {
+    for f in /var/log/nsvpn.log*; do [ -f "$f" ] && catlog "$f"; done
+}
+httperror_cat() {
+    for f in /var/log/httperror.log*; do [ -f "$f" ] && catlog "$f"; done
+}
 
 if [ ! -s /var/log/ns.log ]; then
     flag MEDIUM "/var/log/ns.log missing or empty - possible log wiping; rely on off-box syslog"
 fi
-for f in /var/log/ns.log* /var/log/httpaccess.log* /var/log/bash.log*; do
+for f in /var/log/ns.log* /var/log/messages* /var/log/nsvpn.log* \
+         /var/log/httpaccess.log* /var/log/httpaccess-vpn.log* \
+         /var/log/httperror.log* /var/log/bash.log*; do
     [ -f "$f" ] || continue
     printf '%s\n' "$f"
 done > "$OUT/logs_analysis/log_coverage.txt"
@@ -749,7 +1043,21 @@ nslog_cat | checked_grep -aiE 'nsppe.*(signal|crash|core)|signal (10|11)|core du
 
 PAT_URI='/cgi/samlauth|/saml/login|/wsfed/passive|/oauth/idp/\.well-known|/p/u/doAuthentication\.do|/cgi/GetAuthMethods'
 PAT_PHPREQ='(GET|POST)[^"]*/(vpn|logon|theme|themes)/[^" ?]*\.(php|xhtml|phtml)'
-http_cat() { for f in /var/log/httpaccess.log*; do [ ! -f "$f" ] || catlog "$f"; done; }
+http_cat() {
+    for f in /var/log/httpaccess.log* /var/log/httpaccess-vpn.log*; do
+        [ ! -f "$f" ] || catlog "$f"
+    done
+}
+security_log_cat() {
+    nslog_cat
+    messages_cat
+    vpnlog_cat
+}
+all_ir_log_cat() {
+    security_log_cat
+    http_cat
+    httperror_cat
+}
 http_cat | checked_grep -aE "$PAT_URI" | content_sink > "$OUT/logs_analysis/http_exploit_endpoint_hits.txt"
 http_cat | checked_grep -aE "$PAT_PHPREQ" | content_sink > "$OUT/logs_analysis/http_php_requests_in_vpn_logon.txt"
 for check in http_exploit_endpoint_hits http_php_requests_in_vpn_logon; do
@@ -757,6 +1065,45 @@ for check in http_exploit_endpoint_hits http_php_requests_in_vpn_logon; do
     else hits=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/$check.txt"); fi
     [ "${hits:-0}" -eq 0 ] || flag INFO "$check: $hits request(s); review with off-box logs"
 done
+
+# Correlate parser/crash and command-stage markers across rotated system/VPN
+# logs. These are investigation leads; default mode retains counts only.
+security_log_cat | checked_grep -aiE 'pitboss.*ppe.*(missed too many heartbeats|unexpectedly died).*nsppe|nsppe.*(missed too many heartbeats|unexpectedly died)' \
+    | content_sink > "$OUT/logs_analysis/nsppe_parser_crash_chain.txt"
+if [ "$SENSITIVE" -eq 1 ]; then PARSER_HITS=$(wc -l < "$OUT/logs_analysis/nsppe_parser_crash_chain.txt")
+else PARSER_HITS=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/nsppe_parser_crash_chain.txt"); fi
+[ "${PARSER_HITS:-0}" -eq 0 ] || flag LOW "$PARSER_HITS packet-engine parser/crash-chain log line(s) found; clean startup can contain these, so correlate with command/HTTP/IOC stages - logs_analysis/nsppe_parser_crash_chain.txt"
+
+security_log_cat | checked_grep -aE '\$\{IFS\}|b64decode|/var/log/htt([/[:space:]]|$)|ns_monuploadd_err\.pl.*(^|[[:space:]])-WR([[:space:]]|$)' \
+    | content_sink > "$OUT/logs_analysis/command_stage_markers.txt"
+if [ "$SENSITIVE" -eq 1 ]; then COMMAND_HITS=$(wc -l < "$OUT/logs_analysis/command_stage_markers.txt")
+else COMMAND_HITS=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/command_stage_markers.txt"); fi
+[ "${COMMAND_HITS:-0}" -eq 0 ] || flag HIGH "$COMMAND_HITS command-stage marker line(s) found in system/VPN logs - logs_analysis/command_stage_markers.txt"
+
+http_cat | checked_grep -aiE '(GET|POST)[^"]*/[^" ?]*(receiver|ctxs)[^" ?]*\.css([?[:space:]]|$)' \
+    | content_sink > "$OUT/logs_analysis/http_css_receiver_requests.txt"
+if [ "$SENSITIVE" -eq 1 ]; then CSS_HITS=$(wc -l < "$OUT/logs_analysis/http_css_receiver_requests.txt")
+else CSS_HITS=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/http_css_receiver_requests.txt"); fi
+[ "${CSS_HITS:-0}" -eq 0 ] || flag HIGH "$CSS_HITS CSS receiver-stage request(s) found - logs_analysis/http_css_receiver_requests.txt"
+
+http_cat | checked_grep -aE 'User-Agent:[[:space:]]*[A-Za-z0-9+/]{80,}={0,2}([[:space:]]|$)' \
+    | content_sink > "$OUT/logs_analysis/http_base64_user_agents.txt"
+if [ "$SENSITIVE" -eq 1 ]; then UA_HITS=$(wc -l < "$OUT/logs_analysis/http_base64_user_agents.txt")
+else UA_HITS=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/http_base64_user_agents.txt"); fi
+[ "${UA_HITS:-0}" -eq 0 ] || flag MEDIUM "$UA_HITS request(s) contain a long Base64-like User-Agent - logs_analysis/http_base64_user_agents.txt"
+
+httperror_cat | checked_grep -aiE 'sighup|signal[[:space:]]+1|graceful restart' \
+    | content_sink > "$OUT/logs_analysis/httpd_reload_indicators.txt"
+if [ "$SENSITIVE" -eq 1 ]; then RELOAD_HITS=$(wc -l < "$OUT/logs_analysis/httpd_reload_indicators.txt")
+else RELOAD_HITS=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/httpd_reload_indicators.txt"); fi
+[ "${RELOAD_HITS:-0}" -eq 0 ] || flag INFO "$RELOAD_HITS HTTP daemon reload/restart line(s) found; common during startup, correlate with configuration mtimes - logs_analysis/httpd_reload_indicators.txt"
+
+if [ -n "$IOC_FILE" ]; then
+    all_ir_log_cat | ioc_filter | content_sink > "$OUT/logs_analysis/ioc_log_hits.txt"
+    if [ "$SENSITIVE" -eq 1 ]; then IOC_LOG=$(wc -l < "$OUT/logs_analysis/ioc_log_hits.txt")
+    else IOC_LOG=$(sed 's/^matching_lines=//' "$OUT/logs_analysis/ioc_log_hits.txt"); fi
+    [ "${IOC_LOG:-0}" -eq 0 ] || flag HIGH "$IOC_LOG log line(s) matched the runtime IOC file - logs_analysis/ioc_log_hits.txt"
+fi
 
 checked_grep -v 'authorized_keys' "$OUT/checks/ssh_keys_and_histories.txt" > "$OUT/.history_paths"
 PAT_CMD='wget |curl |fetch |base64|python[0-9.]* -c|perl -e|nc -|chmod [ugoa]*\+s|chmod [0-7]*[4-7][0-7]{3}|/flash/nsconfig/keys|\.F[12]\.key|whoami|/var/tmp/sh'
@@ -774,6 +1121,11 @@ rm -f "$OUT/.command_counts"
 rm -f "$OUT/.history_paths"
 [ -s "$OUT/logs_analysis/shell_command_hits.txt" ] && \
     flag MEDIUM "Attacker-typical commands in bash.log / shell histories - logs_analysis/shell_command_hits.txt"
+if [ -n "$IOC_FILE" ]; then
+    IOC_HASH_AFTER=$(hash1 "$IOC_FILE") || { partial ioc_hash_failed; IOC_HASH_AFTER=''; }
+    [ -z "$IOC_HASH_AFTER" ] || [ "$IOC_SOURCE_HASH" = "$IOC_HASH_AFTER" ] || partial ioc_file_changed_during_collection
+fi
+rm -f "$OUT/.iocs_normalized"
 
 # --------------------------------------------------- 8. hash manifests --
 stage 8 "hash manifests"
@@ -812,6 +1164,7 @@ if [ "$SENSITIVE" -eq 1 ]; then
         if [ ! -f "$p" ] || [ -L "$p" ]; then partial evidence_source_not_regular; continue; fi
         original=$p
         p=$(realpath "$p") || { partial evidence_realpath_failed; continue; }
+        if [ -n "$IOC_FILE" ] && [ "$p" = "$IOC_FILE" ]; then continue; fi
         identity=$("$STAT" -f '%d:%i' "$p") || { partial evidence_stat_failed; continue; }
         case "$identity" in *[!0-9:]*|'') partial evidence_stat_invalid; continue;; esac
         prior=$(awk -F '\t' -v id="$identity" '$1==id {print $2; exit}' "$OUT/.identities")
